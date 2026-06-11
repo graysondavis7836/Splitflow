@@ -311,7 +311,7 @@ const SupabaseBackend = {
    Prototype (this artifact):     const Backend = ArtifactBackend;
    Real cross-device storage:     const Backend = SupabaseBackend;
    ───────────────────────────────────────────────────────────────────── */
-const Backend = ArtifactBackend;
+const Backend = SupabaseBackend;
 
 /* ─── Thin wrappers so the rest of the app reads cleanly. These simply
        forward to whichever Backend is active — do not edit. ─────────── */
