@@ -1903,10 +1903,9 @@ function Auth({ signIn, demo, toast, reset }) {
       setBusy(false);
       if (!res.ok) return setErr(res.error || "Couldn't create your account — please try again.");
       if (res.emailConfirmation) {
-        // Email confirmation is ON — tell the user to check their inbox
-        setMsg("Account created! Check your email and click the confirmation link before signing in.");
-        setMode("in");
+        // Switch to the dedicated confirmation screen — impossible to miss
         setF({ ...f, password: "" });
+        setMode("confirm");
       } else {
         toast("Welcome to BillSplice, " + profileData.name.split(" ")[0] + "!");
         signIn(res.userId, res.profile);
@@ -2019,6 +2018,33 @@ function Auth({ signIn, demo, toast, reset }) {
               {busy ? "Saving…" : "Save new password"}
             </button>
             <button className="linky small" onClick={() => { setErr(""); setMsg(""); setMode("in"); }}>← Back to sign in</button>
+          </div>
+        )}
+        {mode === "confirm" && (
+          <div style={{ textAlign: "center" }}>
+            <div style={{ fontSize: 52, marginBottom: 16 }}>📬</div>
+            <h2 style={{ fontSize: 22, marginBottom: 10, color: "#fff" }}>Check your inbox</h2>
+            <p style={{ color: "#9DC4BE", marginBottom: 16, lineHeight: 1.6 }}>
+              We sent a confirmation link to<br />
+              <b style={{ color: "#5FE6D2" }}>{f.email}</b>
+            </p>
+            <div style={{ background: "rgba(15,181,160,.12)", border: "1px solid rgba(95,230,210,.25)", borderRadius: 13, padding: "14px 18px", marginBottom: 20, textAlign: "left" }}>
+              <p className="small" style={{ color: "#9DC4BE", lineHeight: 1.7, margin: 0 }}>
+                <b style={{ color: "#E7F6F3" }}>1.</b> Open the email from BillSplice<br />
+                <b style={{ color: "#E7F6F3" }}>2.</b> Click the <b style={{ color: "#5FE6D2" }}>"Confirm your email"</b> link<br />
+                <b style={{ color: "#E7F6F3" }}>3.</b> Come back here and sign in
+              </p>
+            </div>
+            <button className="btn pri" style={{ width: "100%", marginBottom: 10 }}
+              onClick={() => { setErr(""); setMsg(""); setMode("in"); }}>
+              I confirmed — take me to sign in
+            </button>
+            <p className="small" style={{ color: "#587676" }}>
+              Didn't get the email? Check your spam folder, or{" "}
+              <button className="linky small" onClick={() => { setErr(""); setMsg(""); setMode("up"); }}>
+                try signing up again
+              </button>
+            </p>
           </div>
         )}
  
