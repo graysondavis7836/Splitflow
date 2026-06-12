@@ -307,11 +307,136 @@ const SupabaseBackend = {
 };
  
 /* ─────────────────────────────────────────────────────────────────────
+   SUPABASE AUTH BACKEND — same as SupabaseBackend but hands ALL
+   password operations (signup, login, reset) to Supabase Auth so
+   passwords are NEVER stored in plain text. Profiles, scores, groups,
+   and codes still live in your own `users` / `groups` tables.
+ 
+   HOW IT WORKS:
+   • Signup  → supabase.auth.signUp()   creates the secure auth record
+               → users table stores profile only (no password field)
+   • Login   → supabase.auth.signInWithPassword() verifies the password
+               → returns the auth user ID → load profile from users table
+   • Reset   → supabase.auth.resetPasswordForEmail() sends a real email
+   • The auth user ID === the profile user ID (we set them to match)
+ 
+   ACTIVATING: change the Backend line below to SupabaseAuthBackend.
+   ROLLING BACK: change it back to SupabaseBackend at any time.
+   ───────────────────────────────────────────────────────────────────── */
+const SupabaseAuthBackend = {
+  get sb() {
+    if (typeof window === "undefined" || !window.supabaseClient)
+      throw new Error("Supabase not initialised — see the BillSplice setup guide.");
+    return window.supabaseClient;
+  },
+ 
+  // ── Profile storage (identical to SupabaseBackend) ──────────────────
+  async saveUser(u) {
+    // Strip password before saving — it lives in Supabase Auth now
+    const { password: _pw, ...safeUser } = u;
+    const { error } = await this.sb.from("users")
+      .upsert({ id: safeUser.id, email: safeUser.email.toLowerCase(), data: safeUser });
+    return !error;
+  },
+  async loadUser(id) {
+    const { data, error } = await this.sb.from("users").select("data").eq("id", id).maybeSingle();
+    return error || !data ? null : data.data;
+  },
+  async findUserByEmail(email) {
+    const { data, error } = await this.sb.from("users").select("data")
+      .eq("email", email.trim().toLowerCase()).maybeSingle();
+    return error || !data ? null : data.data;
+  },
+ 
+  // ── Group storage (identical to SupabaseBackend) ─────────────────────
+  async saveGroup(g) {
+    const { error } = await this.sb.from("groups")
+      .upsert({ id: g.id, code: g.deleted ? null : (g.code || "").toUpperCase(), data: g });
+    return !error;
+  },
+  async loadGroup(id) {
+    const { data, error } = await this.sb.from("groups").select("data").eq("id", id).maybeSingle();
+    return error || !data ? null : data.data;
+  },
+  async findGroupByCode(code) {
+    const { data, error } = await this.sb.from("groups").select("data")
+      .eq("code", code.trim().toUpperCase()).maybeSingle();
+    return error || !data ? null : data.data;
+  },
+ 
+  // ── Session ───────────────────────────────────────────────────────────
+  async saveSession(userId) { try { localStorage.setItem("sf_session", userId); } catch (_) {} },
+  async loadSession() { try { return localStorage.getItem("sf_session"); } catch (_) { return null; } },
+  async clearSession() {
+    try { localStorage.removeItem("sf_session"); } catch (_) {}
+    try { await this.sb.auth.signOut(); } catch (_) {}
+  },
+ 
+  // ── Signup — registers with Supabase Auth, saves profile separately ───
+  // Called by doSignUp in the Auth component instead of the old flow.
+  async signUp(email, password, profileData) {
+    // Step 1: create the auth record — Supabase hashes the password
+    const { data: authData, error: authErr } = await this.sb.auth.signUp({
+      email: email.trim().toLowerCase(),
+      password,
+      options: { data: { name: profileData.name } },
+    });
+    if (authErr) return { ok: false, error: authErr.message };
+    // Step 2: use the auth user's ID as the profile ID so they always match
+    const userId = authData.user?.id;
+    if (!userId) return { ok: false, error: "Signup failed — no user ID returned." };
+    const profile = { ...profileData, id: userId, email: email.trim().toLowerCase() };
+    delete profile.password; // never store the password in the profile
+    await this.saveUser(profile);
+    return { ok: true, userId, profile, emailConfirmation: !authData.session };
+    // emailConfirmation: true means Supabase sent a confirmation email
+    // and the session won't be active until the user clicks the link
+  },
+ 
+  // ── Login — verifies through Supabase Auth, loads profile ────────────
+  async signIn(email, password) {
+    const { data, error } = await this.sb.auth.signInWithPassword({
+      email: email.trim().toLowerCase(),
+      password,
+    });
+    if (error) {
+      // Translate Supabase error messages into friendly ones
+      if (error.message.includes("Email not confirmed"))
+        return { ok: false, error: "Please confirm your email first — check your inbox for the link we sent." };
+      if (error.message.includes("Invalid login credentials"))
+        return { ok: false, error: "That email and password don't match an account." };
+      return { ok: false, error: "Sign in failed — please try again." };
+    }
+    const userId = data.user?.id;
+    if (!userId) return { ok: false, error: "Sign in failed — please try again." };
+    // Load the profile from our users table
+    const profile = await this.loadUser(userId);
+    if (!profile) return { ok: false, error: "Account found but profile is missing — contact support." };
+    return { ok: true, userId, profile };
+  },
+ 
+  // ── Password reset — real email via Supabase Auth ────────────────────
+  async requestPasswordReset(email) {
+    const user = await this.findUserByEmail(email);
+    if (!user) return { ok: false, error: "no-account" };
+    const { error } = await this.sb.auth.resetPasswordForEmail(
+      email.trim().toLowerCase(),
+      { redirectTo: window.location.origin }
+    );
+    return error ? { ok: false, error: "send-failed" } : { ok: true, mode: "email" };
+  },
+  async setNewPassword(_email, _newPassword) {
+    return { ok: true, mode: "email" }; // handled on Supabase's hosted reset page
+  },
+};
+ 
+/* ─────────────────────────────────────────────────────────────────────
    ⇩⇩⇩  THE ONE LINE YOU CHANGE TO GO LIVE  ⇩⇩⇩
    Prototype (this artifact):     const Backend = ArtifactBackend;
    Real cross-device storage:     const Backend = SupabaseBackend;
+   Real storage + secure auth:    const Backend = SupabaseAuthBackend;
    ───────────────────────────────────────────────────────────────────── */
-const Backend = SupabaseBackend;
+const Backend = SupabaseAuthBackend;
  
 /* ─── Thin wrappers so the rest of the app reads cleanly. These simply
        forward to whichever Backend is active — do not edit. ─────────── */
@@ -326,6 +451,12 @@ const dbLoadSession  = ()      => Backend.loadSession();
 const dbClearSession = ()      => Backend.clearSession();
 const dbRequestReset = (email) => Backend.requestPasswordReset(email);
 const dbSetNewPassword = (email, pw) => Backend.setNewPassword(email, pw);
+// Auth-specific wrappers — only SupabaseAuthBackend implements these fully;
+// SupabaseBackend and ArtifactBackend fall back gracefully.
+const dbSignUp = (email, pw, profile) =>
+  Backend.signUp ? Backend.signUp(email, pw, profile) : Promise.resolve({ ok: false, error: "not-supported" });
+const dbSignIn = (email, pw) =>
+  Backend.signIn ? Backend.signIn(email, pw) : Promise.resolve({ ok: false, error: "not-supported" });
  
 // ── Build a full in-memory db object for one signed-in user ────────
 async function buildDbForUser(userId) {
@@ -1735,40 +1866,75 @@ function Auth({ signIn, demo, toast, reset }) {
   };
  
   const doSignIn = async () => {
+    if (!f.email.trim() || !f.password) return setErr("Enter your email and password.");
     setBusy(true); setErr("");
-    const u = await dbFindByEmail(f.email.trim());
-    setBusy(false);
-    if (!u || u.password !== f.password)
-      return setErr("That email and password don't match an account.");
-    signIn(u.id);
+    // SupabaseAuthBackend: verify through Supabase Auth (passwords never exposed)
+    // SupabaseBackend / ArtifactBackend: fall back to direct password check
+    if (Backend.signIn) {
+      const res = await dbSignIn(f.email.trim(), f.password);
+      setBusy(false);
+      if (!res.ok) return setErr(res.error || "That email and password don't match an account.");
+      signIn(res.userId, res.profile);
+    } else {
+      const u = await dbFindByEmail(f.email.trim());
+      setBusy(false);
+      if (!u || u.password !== f.password)
+        return setErr("That email and password don't match an account.");
+      signIn(u.id);
+    }
   };
+ 
   const doSignUp = async () => {
     if (!f.name.trim() || !/.+@.+\..+/.test(f.email) || !f.phone.trim() || f.password.length < 4)
       return setErr("Fill in every field — password needs at least 4 characters.");
     setBusy(true); setErr("");
-    const existing = await dbFindByEmail(f.email.trim());
-    if (existing) { setBusy(false); return setErr("An account already exists with that email."); }
-    const id = uid();
-    const newUser = {
-      id, name: f.name.trim(), email: f.email.trim(), phone: f.phone.trim(),
-      password: f.password, hue: Math.floor(Math.random() * 360), score: 100,
-      metrics: { onTime: 0, billsPaid: 0, failed: 0, late: 0 },
-      groupId: null, cards: [], autopay: {}, updatedAt: Date.now(),
-    };
-    // Save AND verify by reading it back — never claim success on a failed write
-    await dbSaveUser(newUser);
-    let verify = null;
-    for (let i = 0; i < 3; i++) {
-      verify = await dbFindByEmail(newUser.email);
-      if (verify && verify.id === id) break;
-      await new Promise((res) => setTimeout(res, 250));
+    // SupabaseAuthBackend: register through Supabase Auth (password hashed securely)
+    // SupabaseBackend / ArtifactBackend: fall back to direct save
+    if (Backend.signUp) {
+      const existing = await dbFindByEmail(f.email.trim());
+      if (existing) { setBusy(false); return setErr("An account already exists with that email."); }
+      const profileData = {
+        name: f.name.trim(), email: f.email.trim(), phone: f.phone.trim(),
+        hue: Math.floor(Math.random() * 360), score: 100,
+        metrics: { onTime: 0, billsPaid: 0, failed: 0, late: 0 },
+        groupId: null, cards: [], autopay: {}, updatedAt: Date.now(),
+      };
+      const res = await dbSignUp(f.email.trim(), f.password, profileData);
+      setBusy(false);
+      if (!res.ok) return setErr(res.error || "Couldn't create your account — please try again.");
+      if (res.emailConfirmation) {
+        // Email confirmation is ON — tell the user to check their inbox
+        setMsg("Account created! Check your email and click the confirmation link before signing in.");
+        setMode("in");
+        setF({ ...f, password: "" });
+      } else {
+        toast("Welcome to BillSplice, " + profileData.name.split(" ")[0] + "!");
+        signIn(res.userId, res.profile);
+      }
+    } else {
+      // Fallback for non-Auth backends
+      const existing = await dbFindByEmail(f.email.trim());
+      if (existing) { setBusy(false); return setErr("An account already exists with that email."); }
+      const id = uid();
+      const newUser = {
+        id, name: f.name.trim(), email: f.email.trim(), phone: f.phone.trim(),
+        password: f.password, hue: Math.floor(Math.random() * 360), score: 100,
+        metrics: { onTime: 0, billsPaid: 0, failed: 0, late: 0 },
+        groupId: null, cards: [], autopay: {}, updatedAt: Date.now(),
+      };
+      await dbSaveUser(newUser);
+      let verify = null;
+      for (let i = 0; i < 3; i++) {
+        verify = await dbFindByEmail(newUser.email);
+        if (verify && verify.id === id) break;
+        await new Promise((res) => setTimeout(res, 250));
+      }
+      setBusy(false);
+      if (!verify || verify.id !== id)
+        return setErr("Couldn't save your account to shared storage on this device, so you wouldn't be able to sign back in. Please try again, or use a device/browser where storage is available.");
+      toast("Welcome to BillSplice, " + newUser.name.split(" ")[0] + "!");
+      signIn(id, newUser);
     }
-    setBusy(false);
-    if (!verify || verify.id !== id) {
-      return setErr("Couldn't save your account to shared storage on this device, so you wouldn't be able to sign back in. Please try again, or use a device/browser where storage is available.");
-    }
-    toast("Welcome to BillSplice, " + newUser.name.split(" ")[0] + "!");
-    signIn(id, newUser);
   };
  
   return (
@@ -2220,3 +2386,4 @@ export default function SplitFlow() {
     </div>
   );
 }
+ 
