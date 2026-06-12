@@ -4,12 +4,12 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>splitflow</title>
+    <title>BillSplice</title>
     <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
     <script>
       window.supabaseClient = supabase.createClient(
-        "https://afhcdniuassflgeblezp.supabase.co",
-        "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFmaGNkbml1YXNzZmxnZWJsZXpwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODExNzg2NTQsImV4cCI6MjA5Njc1NDY1NH0.99NZ2C2qWlcOkx5Za9ppljHJZpCM7F78DiK5IvlnxWY"
+        "%VITE_SUPABASE_URL%",
+        "%VITE_SUPABASE_KEY%"
       );
     </script>
   </head>
