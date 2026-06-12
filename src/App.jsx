@@ -4,7 +4,7 @@ import {
   ArrowLeftRight, Settings, Plus, Copy, Check, X, LogOut, CreditCard,
   Wallet, AlertTriangle, Link2, UserPlus, Crown, ChevronRight, CalendarDays,
 } from "lucide-react";
- 
+
 /* =================================================================
    BILLSPLICE — functional prototype
    -----------------------------------------------------------------
@@ -15,7 +15,7 @@ import {
    payments, Arcadia/UtilityAPI for utility data) — the rest of the
    app already treats them as the single source of truth.
    ================================================================= */
- 
+
 const Integrations = {
   // SWAP LATER: real card charge (Stripe PaymentIntent, ...)
   chargeCard(card, amount) {
@@ -26,7 +26,7 @@ const Integrations = {
     return { ok: true, confirmation: "SIM-" + Math.random().toString(36).slice(2, 8).toUpperCase() };
   },
 };
- 
+
 /* ╔═══════════════════════════════════════════════════════════════════╗
    ║               UTILITY PROVIDER INTEGRATION LAYER                   ║
    ║                                                                     ║
@@ -47,7 +47,7 @@ const Integrations = {
    ║  credentials shape (always passed in full):                         ║
    ║    { utilityName, utilityType, username, password }                 ║
    ╚═══════════════════════════════════════════════════════════════════╝ */
- 
+
 // ── Utility type catalog ────────────────────────────────────────────
 const UTILITY_TYPES = [
   { value: "electricity", label: "Electricity",      icon: "zap",      base: 140 },
@@ -57,7 +57,7 @@ const UTILITY_TYPES = [
   { value: "trash",       label: "Trash & recycling",icon: "trash",    base: 28  },
   { value: "other",       label: "Other",            icon: "zap",      base: 50  },
 ];
- 
+
 // ── Simulated provider (active by default — swapped out for production) ──
 const SimulatedUtilityProvider = {
   async connect(credentials) {
@@ -89,7 +89,7 @@ const SimulatedUtilityProvider = {
     return { ok: true, amount };
   },
 };
- 
+
 // ── Real provider template — copy this block for each real provider ──
 // const ArcadiaProvider = {
 //   API_KEY: "YOUR_ARCADIA_API_KEY", // store in env var, never in code
@@ -117,18 +117,18 @@ const SimulatedUtilityProvider = {
 //     return { ok: true, amount: data.amount, dueDate: data.dueDate };
 //   },
 // };
- 
+
 // ── ⇩⇩⇩  THE ONE LINE YOU CHANGE TO USE A REAL PROVIDER  ⇩⇩⇩ ────────
 // Simulated (prototype):      const UtilityProvider = SimulatedUtilityProvider;
 // Real (Arcadia example):     const UtilityProvider = ArcadiaProvider;
 const UtilityProvider = SimulatedUtilityProvider;
- 
+
 // ── Look up a provider — checks built-in catalog first, then custom ──
 const getProvider = (g, pid) => PROVIDERS[pid] || (g.customProviders && g.customProviders[pid]) || null;
- 
+
 // ── Helper: is this the demo session? (demo users have ids like u_jordan) ──
 const isDemoSession = (userId) => userId && userId.startsWith("u_");
- 
+
 /* ╔═══════════════════════════════════════════════════════════════════╗
    ║                       SPLITFLOW STORAGE LAYER                       ║
    ║                                                                     ║
@@ -162,9 +162,9 @@ const isDemoSession = (userId) => userId && userId.startsWith("u_");
    ║        Prototype: wipes the old password, writes the new one.       ║
    ║        Supabase: handled by Supabase's own reset page (no-op here). ║
    ╚═══════════════════════════════════════════════════════════════════╝ */
- 
+
 const safeKey = (s) => String(s).toLowerCase().replace(/[^a-z0-9]/g, "_").slice(0, 180);
- 
+
 /* ─────────────────────────────────────────────────────────────────────
    DEFAULT BACKEND — Claude artifact storage.
    Works as a self-contained prototype. NOTE: artifact storage is scoped
@@ -183,7 +183,7 @@ const ArtifactBackend = {
   async _del(key, shared) {
     try { await window.storage.delete(key, shared); } catch (_) {}
   },
- 
+
   async saveUser(u) {
     const a = await this._set("sf_u:" + u.id, JSON.stringify(u), true);
     const b = await this._set("sf_em:" + safeKey(u.email), u.id, true);
@@ -197,7 +197,7 @@ const ArtifactBackend = {
     const id = await this._get("sf_em:" + safeKey(email), true);
     return id ? this.loadUser(id) : null;
   },
- 
+
   async saveGroup(g) {
     const a = await this._set("sf_g:" + g.id, JSON.stringify(g), true);
     let b = true;
@@ -212,11 +212,11 @@ const ArtifactBackend = {
     const id = await this._get("sf_c:" + code.trim().toUpperCase(), true);
     return id ? this.loadGroup(id) : null;
   },
- 
+
   async saveSession(userId) { await this._set("sf_session", userId, false); },
   async loadSession() { return this._get("sf_session", false); },
   async clearSession() { await this._del("sf_session", false); },
- 
+
   // Prototype reset: no email possible, so confirm the account exists and
   // let the app collect a new password immediately.
   async requestPasswordReset(email) {
@@ -234,17 +234,17 @@ const ArtifactBackend = {
     return saved ? { ok: true, user } : { ok: false, error: "save-failed" };
   },
 };
- 
+
 /* ─────────────────────────────────────────────────────────────────────
    SUPABASE BACKEND — real cross-device storage. (INACTIVE until you
    complete the setup guide and flip the `Backend` assignment at bottom.)
- 
+
    This is intentionally written out and ready. To activate:
      1. Follow the SETUP GUIDE (in chat) to create your Supabase project
         and the `users` and `groups` tables.
      2. Add the Supabase script + your URL/key (guide shows exactly how).
      3. Change the last line of this section to:  const Backend = SupabaseBackend;
- 
+
    It expects a global `supabaseClient` created from your project URL+key.
    ───────────────────────────────────────────────────────────────────── */
 const SupabaseBackend = {
@@ -253,7 +253,7 @@ const SupabaseBackend = {
       throw new Error("Supabase not initialised — see the BillSplice setup guide.");
     return window.supabaseClient;
   },
- 
+
   async saveUser(u) {
     const { error } = await this.sb.from("users")
       .upsert({ id: u.id, email: u.email.toLowerCase(), data: u });
@@ -268,7 +268,7 @@ const SupabaseBackend = {
       .eq("email", email.trim().toLowerCase()).maybeSingle();
     return error || !data ? null : data.data;
   },
- 
+
   async saveGroup(g) {
     const { error } = await this.sb.from("groups")
       .upsert({ id: g.id, code: g.deleted ? null : (g.code || "").toUpperCase(), data: g });
@@ -283,12 +283,12 @@ const SupabaseBackend = {
       .eq("code", code.trim().toUpperCase()).maybeSingle();
     return error || !data ? null : data.data;
   },
- 
+
   // Session stays device-local (which login is active on THIS device)
   async saveSession(userId) { try { localStorage.setItem("sf_session", userId); } catch (_) {} },
   async loadSession() { try { return localStorage.getItem("sf_session"); } catch (_) { return null; } },
   async clearSession() { try { localStorage.removeItem("sf_session"); } catch (_) {} },
- 
+
   // Real reset email via Supabase Auth. Supabase sends the message and hosts
   // the secure link; the user sets their new password on Supabase's page.
   async requestPasswordReset(email) {
@@ -305,13 +305,13 @@ const SupabaseBackend = {
     return { ok: true, mode: "email" };
   },
 };
- 
+
 /* ─────────────────────────────────────────────────────────────────────
    SUPABASE AUTH BACKEND — same as SupabaseBackend but hands ALL
    password operations (signup, login, reset) to Supabase Auth so
    passwords are NEVER stored in plain text. Profiles, scores, groups,
    and codes still live in your own `users` / `groups` tables.
- 
+
    HOW IT WORKS:
    • Signup  → supabase.auth.signUp()   creates the secure auth record
                → users table stores profile only (no password field)
@@ -319,7 +319,7 @@ const SupabaseBackend = {
                → returns the auth user ID → load profile from users table
    • Reset   → supabase.auth.resetPasswordForEmail() sends a real email
    • The auth user ID === the profile user ID (we set them to match)
- 
+
    ACTIVATING: change the Backend line below to SupabaseAuthBackend.
    ROLLING BACK: change it back to SupabaseBackend at any time.
    ───────────────────────────────────────────────────────────────────── */
@@ -329,7 +329,7 @@ const SupabaseAuthBackend = {
       throw new Error("Supabase not initialised — see the BillSplice setup guide.");
     return window.supabaseClient;
   },
- 
+
   // ── Profile storage (identical to SupabaseBackend) ──────────────────
   async saveUser(u) {
     // Strip password before saving — it lives in Supabase Auth now
@@ -347,7 +347,7 @@ const SupabaseAuthBackend = {
       .eq("email", email.trim().toLowerCase()).maybeSingle();
     return error || !data ? null : data.data;
   },
- 
+
   // ── Group storage (identical to SupabaseBackend) ─────────────────────
   async saveGroup(g) {
     const { error } = await this.sb.from("groups")
@@ -363,7 +363,7 @@ const SupabaseAuthBackend = {
       .eq("code", code.trim().toUpperCase()).maybeSingle();
     return error || !data ? null : data.data;
   },
- 
+
   // ── Session ───────────────────────────────────────────────────────────
   async saveSession(userId) { try { localStorage.setItem("sf_session", userId); } catch (_) {} },
   async loadSession() { try { return localStorage.getItem("sf_session"); } catch (_) { return null; } },
@@ -371,7 +371,7 @@ const SupabaseAuthBackend = {
     try { localStorage.removeItem("sf_session"); } catch (_) {}
     try { await this.sb.auth.signOut(); } catch (_) {}
   },
- 
+
   // ── Signup — registers with Supabase Auth, saves profile separately ───
   // Called by doSignUp in the Auth component instead of the old flow.
   async signUp(email, password, profileData) {
@@ -392,7 +392,7 @@ const SupabaseAuthBackend = {
     // emailConfirmation: true means Supabase sent a confirmation email
     // and the session won't be active until the user clicks the link
   },
- 
+
   // ── Login — verifies through Supabase Auth, loads profile ────────────
   async signIn(email, password) {
     const { data, error } = await this.sb.auth.signInWithPassword({
@@ -414,7 +414,7 @@ const SupabaseAuthBackend = {
     if (!profile) return { ok: false, error: "Account found but profile is missing — contact support." };
     return { ok: true, userId, profile };
   },
- 
+
   // ── Password reset — real email via Supabase Auth ────────────────────
   async requestPasswordReset(email) {
     const user = await this.findUserByEmail(email);
@@ -429,7 +429,7 @@ const SupabaseAuthBackend = {
     return { ok: true, mode: "email" }; // handled on Supabase's hosted reset page
   },
 };
- 
+
 /* ─────────────────────────────────────────────────────────────────────
    ⇩⇩⇩  THE ONE LINE YOU CHANGE TO GO LIVE  ⇩⇩⇩
    Prototype (this artifact):     const Backend = ArtifactBackend;
@@ -437,7 +437,7 @@ const SupabaseAuthBackend = {
    Real storage + secure auth:    const Backend = SupabaseAuthBackend;
    ───────────────────────────────────────────────────────────────────── */
 const Backend = SupabaseAuthBackend;
- 
+
 /* ─── Thin wrappers so the rest of the app reads cleanly. These simply
        forward to whichever Backend is active — do not edit. ─────────── */
 const dbSaveUser     = (u)     => Backend.saveUser(u);
@@ -457,7 +457,7 @@ const dbSignUp = (email, pw, profile) =>
   Backend.signUp ? Backend.signUp(email, pw, profile) : Promise.resolve({ ok: false, error: "not-supported" });
 const dbSignIn = (email, pw) =>
   Backend.signIn ? Backend.signIn(email, pw) : Promise.resolve({ ok: false, error: "not-supported" });
- 
+
 // ── Build a full in-memory db object for one signed-in user ────────
 async function buildDbForUser(userId) {
   const user = await dbLoadUser(userId);
@@ -480,9 +480,9 @@ async function buildDbForUser(userId) {
   }
   return db;
 }
- 
+
 /* ----------------------------- catalog ----------------------------- */
- 
+
 const PROVIDERS = {
   oncor:     { id: "oncor",     name: "Oncor Electric",      icon: "zap",      base: 140,   dueDay: 21, tag: "Electricity" },
   citywater: { id: "citywater", name: "City Water Utility",  icon: "droplets", base: 60,    dueDay: 22, tag: "Water" },
@@ -491,15 +491,15 @@ const PROVIDERS = {
   waste:     { id: "waste",     name: "City Waste Services", icon: "trash",    base: 28,    dueDay: 24, tag: "Trash & recycling" },
 };
 const ICONS = { zap: Zap, droplets: Droplets, flame: Flame, wifi: Wifi, trash: Trash2 };
- 
+
 const JOIN_POOL = [
   { name: "Riley Chen",  email: "riley.chen@mail.com",  phone: "(469) 555-0188", hue: 28,  score: 96, metrics: { onTime: 14, billsPaid: 16, failed: 0, late: 2 } },
   { name: "Dana Brooks", email: "dana.brooks@mail.com", phone: "(972) 555-0142", hue: 330, score: 99, metrics: { onTime: 21, billsPaid: 22, failed: 0, late: 1 } },
   { name: "Omar Haddad", email: "omar.h@mail.com",      phone: "(214) 555-0177", hue: 95,  score: 92, metrics: { onTime: 11, billsPaid: 15, failed: 1, late: 3 } },
 ];
- 
+
 /* ----------------------------- utils ----------------------------- */
- 
+
 const round2 = (n) => Math.round(n * 100) / 100;
 const fmt = (n) => {
   const v = round2(n);
@@ -521,11 +521,11 @@ const makeCode = () => {
   for (let i = 0; i < 6; i++) c += chars[Math.floor(Math.random() * chars.length)];
   return c;
 };
- 
+
 /* ----------------------------- engine ----------------------------- */
- 
+
 const memberIds = (g) => g.members.map((m) => m.userId);
- 
+
 function sharesFor(bill) {
   const ids = Object.keys(bill.split).filter((id) => bill.split[id] > 0);
   const shares = {};
@@ -548,12 +548,12 @@ const remainingShare = (bill, uidd) => {
 };
 const balanceOf = (g) =>
   round2(g.ledger.reduce((a, e) => a + (e.type === "deposit" ? e.amount : -e.amount), 0));
- 
+
 function log(g, date, msg, kind) {
   g.activity.unshift({ id: uid(), date, msg, kind });
   if (g.activity.length > 60) g.activity.length = 60;
 }
- 
+
 function contribute(db, g, uidd, bill, amount, method, date) {
   amount = round2(amount);
   if (amount <= 0.004) return;
@@ -567,7 +567,7 @@ function contribute(db, g, uidd, bill, amount, method, date) {
     if (bill.status === "paid") u.metrics.billsPaid++;
   }
 }
- 
+
 function settle(db, g, date) {
   let guard = 0;
   while (guard++ < 25) {
@@ -585,7 +585,7 @@ function settle(db, g, date) {
     log(g, date, "House wallet paid " + b.name + " — " + fmt(b.total), "paid");
   }
 }
- 
+
 function allocateDeposit(db, g, uidd, amount, method, date) {
   let rem = round2(amount);
   const open = g.bills
@@ -601,7 +601,7 @@ function allocateDeposit(db, g, uidd, amount, method, date) {
     g.ledger.push({ id: uid(), date, type: "deposit", userId: uidd, amount: rem, method, note: "Wallet top-up" });
   settle(db, g, date);
 }
- 
+
 function equalSplit(ids) {
   const split = {};
   let acc = 0;
@@ -611,7 +611,7 @@ function equalSplit(ids) {
   });
   return split;
 }
- 
+
 function makeBill(g, provider, due, monthKey, ids, fixedAmount) {
   const imported = fixedAmount !== undefined
     ? { amount: fixedAmount, due, month: monthKey }
@@ -623,7 +623,7 @@ function makeBill(g, provider, due, monthKey, ids, fixedAmount) {
     contributed: {}, sharePaidDate: {}, lateFlagged: {}, autopayFailed: {},
   };
 }
- 
+
 function advanceDay(db) {
   const prev = db.simDate;
   const next = addDays(prev, 1);
@@ -680,9 +680,9 @@ function advanceDay(db) {
     }
   }
 }
- 
+
 /* ------------------------ group operations ------------------------ */
- 
+
 function mkUser(db, id, name, email, phone, password, hue, score, metrics) {
   db.users[id] = {
     id, name, email, phone, password, hue,
@@ -690,7 +690,7 @@ function mkUser(db, id, name, email, phone, password, hue, score, metrics) {
   };
   return db.users[id];
 }
- 
+
 function createGroup(db, uidd, name) {
   const id = uid();
   db.groups[id] = {
@@ -702,7 +702,7 @@ function createGroup(db, uidd, name) {
   log(db.groups[id], db.simDate, db.users[uidd].name + " created the living group", "info");
   return db.groups[id];
 }
- 
+
 function joinGroup(db, uidd, code) {
   const g = Object.values(db.groups).find((x) => !x.deleted && x.code === code.trim().toUpperCase());
   if (!g) return { error: "No living group matches that code. Double-check it with your roommate." };
@@ -712,7 +712,7 @@ function joinGroup(db, uidd, code) {
   log(g, db.simDate, db.users[uidd].name + " joined the house", "new");
   return { group: g };
 }
- 
+
 function redistribute(bill, leavingId) {
   if (!(leavingId in bill.split)) return;
   const p = bill.split[leavingId];
@@ -730,7 +730,7 @@ function redistribute(bill, leavingId) {
     }
   });
 }
- 
+
 function removeFromGroup(db, g, uidd) {
   const wasAdmin = g.members.find((m) => m.userId === uidd)?.admin;
   g.members = g.members.filter((m) => m.userId !== uidd);
@@ -743,9 +743,9 @@ function removeFromGroup(db, g, uidd) {
     log(g, db.simDate, db.users[next.userId].name + " is now the house admin (longest-tenured member)", "info");
   }
 }
- 
+
 /* ----------------------------- demo seed ----------------------------- */
- 
+
 function seedDemo() {
   const db = { simDate: "2026-06-10", users: {}, groups: {} };
   mkUser(db, "u_jordan", "Jordan Lee", "jordan@maple5.house", "(214) 555-0114", "demo", 172, 100, { onTime: 22, billsPaid: 24, failed: 0, late: 0 });
@@ -755,7 +755,7 @@ function seedDemo() {
   db.users.u_sarah.cards = [{ id: uid(), brand: "Mastercard", last4: "8810", exp: "11/27", holder: "Sarah Kim" }];
   db.users.u_jordan.autopay = { oncor: true, citywater: true, atmos: true, frontier: true };
   db.users.u_sarah.autopay = { oncor: true };
- 
+
   const g = {
     id: "g_maple", name: "Maple & 5th House", code: "MAPLE5",
     members: [
@@ -770,7 +770,7 @@ function seedDemo() {
   db.users.u_jordan.groupId = "g_maple";
   db.users.u_sarah.groupId = "g_maple";
   db.users.u_mike.groupId = "g_maple";
- 
+
   // May history (already settled — equal thirds of $317.59)
   [["u_jordan", 105.86], ["u_sarah", 105.86], ["u_mike", 105.87]].forEach(([id, amt], i) => {
     g.ledger.push({ id: uid(), date: "2026-05-0" + (4 + i), type: "deposit", userId: id, amount: amt, method: i === 0 ? "Autopay" : "Manual", note: "May utilities" });
@@ -778,7 +778,7 @@ function seedDemo() {
   [["Frontier Fiber", 79.99, "2026-05-16"], ["Atmos Energy", 41.3, "2026-05-18"], ["City Water Utility", 58.1, "2026-05-20"], ["Oncor Electric", 138.2, "2026-05-19"]].forEach(([n, amt, d]) => {
     g.ledger.push({ id: uid(), date: d, type: "bill", amount: amt, method: "House wallet", note: "Paid " + n + " (May)" });
   });
- 
+
   // June bills imported from connected utilities
   const ids = memberIds(g);
   const bInt = makeBill(g, PROVIDERS.frontier, "2026-06-18", "2026-06", ids, 79.99);
@@ -788,7 +788,7 @@ function seedDemo() {
   g.bills.push(bInt, bGas, bEle, bWat);
   ["Frontier Fiber", "Atmos Energy", "Oncor Electric", "City Water Utility"].forEach((n) =>
     log(g, "2026-06-01", "New bill detected from " + n, "new"));
- 
+
   // Scripted June flow (everything below runs through the real engine)
   contribute(db, g, "u_sarah", bInt, remainingShare(bInt, "u_sarah"), "Manual", "2026-06-03");
   contribute(db, g, "u_jordan", bInt, remainingShare(bInt, "u_jordan"), "Autopay", "2026-06-04");
@@ -810,12 +810,12 @@ function seedDemo() {
   Object.values(db.groups).forEach((x) => { x.updatedAt = seedStamp; });
   return db;
 }
- 
+
 /* ----------------------------- styles ----------------------------- */
- 
+
 const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap');
- 
+
 :root{
   --ink:#0C2027; --ink-2:#33484E; --mute:#5F7479; --mist:#EDF3F3; --card:#FFFFFF;
   --line:#DBE6E6; --line-2:#C8D8D8; --teal:#0FB5A0; --teal-ink:#0A7568; --teal-soft:#DCF5F1;
@@ -830,7 +830,7 @@ const CSS = `
 button{font:inherit;cursor:pointer;border:none;background:none;color:inherit}
 input{font:inherit;color:inherit}
 button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px solid var(--teal);outline-offset:2px;border-radius:8px}
- 
+
 /* layout */
 .sf-shell{display:flex;min-height:100vh}
 .sf-side{width:228px;flex-shrink:0;background:var(--deep);color:#BFD6D6;display:flex;flex-direction:column;
@@ -851,7 +851,7 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
 .sf-eyebrow{font-size:11.5px;font-weight:600;letter-spacing:.14em;text-transform:uppercase;color:var(--teal-ink)}
 .sf-h1{font-size:26px;font-weight:700;margin:2px 0 4px}
 .sf-sub{color:var(--mute);margin-bottom:20px}
- 
+
 /* cards & bits */
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:18px;
   box-shadow:0 1px 2px rgba(12,32,39,.04)}
@@ -882,7 +882,7 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
 .spread{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .muted{color:var(--mute)} .small{font-size:12.5px} .num{font-variant-numeric:tabular-nums}
 .hr{height:1px;background:var(--line);margin:14px 0;border:none}
- 
+
 /* avatar / score */
 .av{border-radius:50%;display:inline-flex;align-items:center;justify-content:center;color:#fff;
   font-weight:700;font-family:'Space Grotesk';flex-shrink:0;letter-spacing:.02em}
@@ -893,14 +893,14 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
 .sync i{width:7px;height:7px;border-radius:50%;background:var(--teal);display:inline-block}
 .sync.off{color:var(--amber);background:var(--amber-soft)}
 .sync.off i{background:var(--amber)}
- 
+
 /* toggle */
 .tog{width:42px;height:24px;border-radius:99px;background:#CBD9D9;position:relative;transition:background .15s;flex-shrink:0}
 .tog.on{background:var(--teal)}
 .tog::after{content:'';position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;
   background:#fff;transition:left .15s;box-shadow:0 1px 2px rgba(0,0,0,.2)}
 .tog.on::after{left:21px}
- 
+
 /* wallet tank (signature) */
 .wallet-card{background:linear-gradient(150deg,#0A222B,#071A20 60%);color:#E7F6F3;border:1px solid #123843;
   border-radius:var(--r);padding:20px;position:relative;overflow:hidden}
@@ -913,7 +913,7 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
 .tank-grid{position:absolute;inset:0;background-image:linear-gradient(rgba(255,255,255,.05) 1px,transparent 1px);
   background-size:100% 27px;pointer-events:none}
 @keyframes drift{to{transform:translateX(-50%)}}
- 
+
 /* bill rows */
 .bill-ic{width:38px;height:38px;border-radius:11px;display:flex;align-items:center;justify-content:center;
   background:var(--teal-soft);color:var(--teal-ink);flex-shrink:0}
@@ -921,18 +921,18 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
 .lrow{display:flex;align-items:center;gap:12px;padding:11px 2px;border-bottom:1px solid var(--line)}
 .lrow:last-child{border-bottom:none}
 .cardform{display:grid;grid-template-columns:1.2fr 1.4fr .7fr auto;gap:9px;align-items:end}
- 
+
 /* alerts */
 .alert{display:flex;gap:11px;align-items:flex-start;border-radius:13px;padding:13px 15px;font-size:13.5px}
 .alert.rose{background:var(--rose-soft);color:#8C1F40;border:1px solid #F2C4D2}
 .alert.amber{background:var(--amber-soft);color:#7A4E0A;border:1px solid #EDD9B0}
- 
+
 /* modal */
 .scrim{position:fixed;inset:0;background:rgba(7,26,32,.5);backdrop-filter:blur(3px);
   display:flex;align-items:center;justify-content:center;z-index:80;padding:18px}
 .modal{background:#fff;border-radius:18px;width:100%;max-width:460px;max-height:88vh;overflow:auto;
   padding:22px;box-shadow:0 24px 70px rgba(7,26,32,.35)}
- 
+
 /* auth */
 .auth{min-height:100vh;background:var(--deep);color:#E7F6F3;display:flex;align-items:center;justify-content:center;
   padding:24px;position:relative;overflow:hidden}
@@ -944,13 +944,13 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
 .ribbon{position:absolute;inset:0;opacity:.6;pointer-events:none}
 .linky{color:#5FE6D2;font-weight:600;background:none}
 .linky:hover{text-decoration:underline}
- 
+
 /* toasts */
 .toasts{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:9px;z-index:120}
 .toast{background:var(--deep);color:#DFF7F2;border:1px solid rgba(95,230,210,.3);border-radius:12px;
   padding:11px 15px;font-size:13.5px;box-shadow:0 10px 30px rgba(7,26,32,.35);animation:pop .2s ease}
 @keyframes pop{from{transform:translateY(8px);opacity:0}}
- 
+
 @media(max-width:900px){
   .sf-side{position:fixed;bottom:0;top:auto;left:0;right:0;width:100%;height:auto;flex-direction:row;
     align-items:center;padding:8px 10px;z-index:60;background-image:none}
@@ -969,9 +969,9 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
   *{transition:none!important}
 }
 `;
- 
+
 /* ----------------------------- small components ----------------------------- */
- 
+
 function Avatar({ user, size = 36 }) {
   const initials = user.name.split(" ").map((w) => w[0]).slice(0, 2).join("");
   return (
@@ -981,7 +981,7 @@ function Avatar({ user, size = 36 }) {
     }} aria-hidden="true">{initials}</span>
   );
 }
- 
+
 function ScoreRing({ score, size = 52 }) {
   const r = (size - 8) / 2, c = 2 * Math.PI * r;
   const color = score >= 95 ? "var(--teal)" : score >= 85 ? "var(--amber)" : "var(--rose)";
@@ -996,20 +996,20 @@ function ScoreRing({ score, size = 52 }) {
     </svg>
   );
 }
- 
+
 function Pill({ tone, children }) { return <span className={"pill " + tone}>{children}</span>; }
- 
+
 function StatusPill({ bill, today }) {
   if (bill.status === "paid") return <Pill tone="teal"><Check size={12} /> Paid {fmtDate(bill.paidOn)}</Pill>;
   if (today > bill.due) return <Pill tone="rose">Late · due {fmtDate(bill.due)}</Pill>;
   if (daysUntil(today, bill.due) <= 5) return <Pill tone="amber">Due soon · {fmtDate(bill.due)}</Pill>;
   return <Pill tone="slate">Due {fmtDate(bill.due)}</Pill>;
 }
- 
+
 function Toggle({ on, onClick, label }) {
   return <button className={"tog" + (on ? " on" : "")} role="switch" aria-checked={on} aria-label={label} onClick={onClick} />;
 }
- 
+
 function Modal({ title, onClose, children, wide }) {
   return (
     <div className="scrim" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
@@ -1023,7 +1023,7 @@ function Modal({ title, onClose, children, wide }) {
     </div>
   );
 }
- 
+
 function Tank({ pct }) {
   const p = Math.max(3, Math.min(100, pct));
   return (
@@ -1037,7 +1037,7 @@ function Tank({ pct }) {
     </div>
   );
 }
- 
+
 function FlowRibbon() {
   return (
     <svg className="ribbon" viewBox="0 0 900 600" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
@@ -1048,9 +1048,9 @@ function FlowRibbon() {
     </svg>
   );
 }
- 
+
 /* ----------------------------- pages ----------------------------- */
- 
+
 function Dashboard({ db, me, g, mutate, toast, setModal, setPage }) {
   const today = db.simDate;
   const monthBills = g.bills.filter((b) => b.month === monthOf(today));
@@ -1064,7 +1064,7 @@ function Dashboard({ db, me, g, mutate, toast, setModal, setPage }) {
   const unpaidTotal = round2(g.bills.filter((b) => b.status === "unpaid").reduce((a, b) => a + b.total, 0));
   const pct = unpaidTotal <= 0 ? 100 : Math.min(100, (balance / unpaidTotal) * 100);
   const isAdmin = g.members.find((m) => m.userId === me.id)?.admin;
- 
+
   // roommates who still owe their share on bills the wallet already covered
   const debts = {};
   g.bills.forEach((b) => {
@@ -1080,7 +1080,7 @@ function Dashboard({ db, me, g, mutate, toast, setModal, setPage }) {
   });
   const newJoiners = g.members.filter((m) =>
     g.bills.some((b) => b.status === "unpaid" && !(m.userId in b.split)));
- 
+
   return (
     <div className="sf-page">
       <div className="sf-eyebrow">Dashboard</div>
@@ -1094,7 +1094,7 @@ function Dashboard({ db, me, g, mutate, toast, setModal, setPage }) {
         </div>
       </div>
       <div style={{ height: 18 }} />
- 
+
       {Object.keys(debts).length > 0 && (
         <div className="alert rose" style={{ marginBottom: 14 }}>
           <AlertTriangle size={17} style={{ flexShrink: 0, marginTop: 1 }} />
@@ -1115,7 +1115,7 @@ function Dashboard({ db, me, g, mutate, toast, setModal, setPage }) {
             month's splits yet — use <b>Edit split</b> below to include them as much (or as little) as you decide.</div>
         </div>
       )}
- 
+
       <div className="grid g3">
         <div className="card">
           <div className="small muted">Needed this month</div>
@@ -1134,7 +1134,7 @@ function Dashboard({ db, me, g, mutate, toast, setModal, setPage }) {
         </div>
       </div>
       <div style={{ height: 14 }} />
- 
+
       <div className="grid g2" style={{ alignItems: "start" }}>
         <div className="wallet-card">
           <div className="spread" style={{ position: "relative" }}>
@@ -1151,7 +1151,7 @@ function Dashboard({ db, me, g, mutate, toast, setModal, setPage }) {
             <button className="btn pri sm" onClick={() => setModal({ type: "deposit" })}><Plus size={14} /> Add money</button>
           </div>
         </div>
- 
+
         <div className="card">
           <div className="spread" style={{ marginBottom: 4 }}>
             <b className="sf-display">Bills this month</b>
@@ -1175,7 +1175,7 @@ function Dashboard({ db, me, g, mutate, toast, setModal, setPage }) {
         </div>
       </div>
       <div style={{ height: 14 }} />
- 
+
       <div className="grid g2" style={{ alignItems: "start" }}>
         <div className="card">
           <div className="spread" style={{ marginBottom: 10 }}>
@@ -1203,7 +1203,7 @@ function Dashboard({ db, me, g, mutate, toast, setModal, setPage }) {
           ))}
           {cycleBills.length === 0 && <p className="muted small">Splits appear once bills are imported.</p>}
         </div>
- 
+
         <div className="card">
           <b className="sf-display" style={{ display: "block", marginBottom: 4 }}>Activity</b>
           {g.activity.slice(0, 8).map((a) => (
@@ -1221,7 +1221,7 @@ function Dashboard({ db, me, g, mutate, toast, setModal, setPage }) {
     </div>
   );
 }
- 
+
 function BillsPage({ db, me, g, mutate, setModal, toast }) {
   const isAdmin = g.members.find((m) => m.userId === me.id)?.admin;
   const today = db.simDate;
@@ -1231,7 +1231,7 @@ function BillsPage({ db, me, g, mutate, setModal, toast }) {
   const grand = round2(monthBills.reduce((a, b) => a + b.total, 0));
   const portionOf = (id) => round2(monthBills.reduce((a, b) => a + shareOf(b, id), 0));
   const hasCard = me.cards.length > 0;
- 
+
   return (
     <div className="sf-page">
       <div className="sf-eyebrow">Bills</div>
@@ -1243,7 +1243,7 @@ function BillsPage({ db, me, g, mutate, setModal, toast }) {
         <button className="btn dark" onClick={() => setModal({ type: "connect" })}><Link2 size={15} /> Connect a utility</button>
       </div>
       <div style={{ height: 18 }} />
- 
+
       <div className="card" style={{ marginBottom: 14 }}>
         <div className="spread" style={{ flexWrap: "wrap", gap: 10 }}>
           <div>
@@ -1266,7 +1266,7 @@ function BillsPage({ db, me, g, mutate, setModal, toast }) {
           </div>
         </div>
       </div>
- 
+
       {monthBills.length === 0 && (
         <div className="card" style={{ textAlign: "center", padding: 36 }}>
           <Link2 size={26} style={{ color: "var(--teal-ink)" }} />
@@ -1275,7 +1275,7 @@ function BillsPage({ db, me, g, mutate, setModal, toast }) {
           <button className="btn pri" onClick={() => setModal({ type: "connect" })}>Connect a utility</button>
         </div>
       )}
- 
+
       {monthBills.map((b) => {
         const Icon = ICONS[b.icon];
         const myRem = remainingShare(b, me.id);
@@ -1339,7 +1339,7 @@ function BillsPage({ db, me, g, mutate, setModal, toast }) {
     </div>
   );
 }
- 
+
 function RoommatesPage({ db, me, g, mutate, toast, setModal }) {
   const isAdmin = g.members.find((m) => m.userId === me.id)?.admin;
   const [copied, setCopied] = useState(false);
@@ -1361,13 +1361,13 @@ function RoommatesPage({ db, me, g, mutate, toast, setModal }) {
     });
     toast("A roommate joined with your code — adjust splits to include them.");
   };
- 
+
   return (
     <div className="sf-page">
       <div className="sf-eyebrow">Roommates</div>
       <h1 className="sf-h1">{g.name}</h1>
       <p className="sf-sub">Roommate scores follow each person across every group they join.</p>
- 
+
       <div className="card" style={{ marginBottom: 14 }}>
         <div className="spread" style={{ flexWrap: "wrap", gap: 10 }}>
           <div className="row">
@@ -1386,7 +1386,7 @@ function RoommatesPage({ db, me, g, mutate, toast, setModal }) {
           </div>
         </div>
       </div>
- 
+
       <div className="grid g2">
         {[...g.members].sort((a, b) => (a.joinedAt < b.joinedAt ? -1 : 1)).map((m) => {
           const u = db.users[m.userId];
@@ -1426,7 +1426,7 @@ function RoommatesPage({ db, me, g, mutate, toast, setModal }) {
     </div>
   );
 }
- 
+
 function PaymentsPage({ db, me, g }) {
   const [filter, setFilter] = useState("all");
   const rows = [...g.ledger].reverse().filter((e) =>
@@ -1465,14 +1465,14 @@ function PaymentsPage({ db, me, g }) {
     </div>
   );
 }
- 
+
 function SettingsPage({ db, me, g, mutate, toast, setModal }) {
   const member = g.members.find((m) => m.userId === me.id);
   const isAdmin = member?.admin;
   const today = db.simDate;
   const [name, setName] = useState(g.name);
   const [card, setCard] = useState({ holder: "", number: "", exp: "" });
- 
+
   const estFor = (pid) => {
     const b = g.bills.filter((x) => x.providerId === pid).sort((a, c) => (a.month < c.month ? 1 : -1))[0];
     return b ? b.total : PROVIDERS[pid].base;
@@ -1490,13 +1490,13 @@ function SettingsPage({ db, me, g, mutate, toast, setModal }) {
     setCard({ holder: "", number: "", exp: "" });
     toast("Card connected. Autopay and deposits can now pull from it.");
   };
- 
+
   return (
     <div className="sf-page">
       <div className="sf-eyebrow">Settings</div>
       <h1 className="sf-h1">Settings</h1>
       <p className="sf-sub">Your house, autopay, and payment details.</p>
- 
+
       <div className="card" style={{ marginBottom: 14 }}>
         <b className="sf-display" style={{ display: "block", marginBottom: 10 }}>Living group</b>
         <div className="spread" style={{ flexWrap: "wrap", gap: 12 }}>
@@ -1519,7 +1519,7 @@ function SettingsPage({ db, me, g, mutate, toast, setModal }) {
           </div>
         </div>
       </div>
- 
+
       <div className="card" style={{ marginBottom: 14 }}>
         <b className="sf-display" style={{ display: "block" }}>Autopay</b>
         <p className="small muted" style={{ marginBottom: 8 }}>
@@ -1545,7 +1545,7 @@ function SettingsPage({ db, me, g, mutate, toast, setModal }) {
           );
         })}
       </div>
- 
+
       <div className="card" style={{ marginBottom: 14 }}>
         <b className="sf-display" style={{ display: "block", marginBottom: 8 }}>Payment method</b>
         {me.cards.map((c) => (
@@ -1569,7 +1569,7 @@ function SettingsPage({ db, me, g, mutate, toast, setModal }) {
         </div>
         <p className="small muted" style={{ marginTop: 8 }}>Prototype: cards are simulated — no real charges. Money from cards always lands in the house wallet; bills are only ever paid from the wallet.</p>
       </div>
- 
+
       <div className="card" style={{ borderColor: "#F2C4D2" }}>
         <div className="spread" style={{ flexWrap: "wrap", gap: 10 }}>
           <div>
@@ -1580,12 +1580,22 @@ function SettingsPage({ db, me, g, mutate, toast, setModal }) {
           <button className="btn danger" onClick={() => setModal({ type: "leave" })}><LogOut size={15} /> Leave group</button>
         </div>
       </div>
+
+      <div className="card" style={{ borderColor: "#F2C4D2", marginTop: 14 }}>
+        <div className="spread" style={{ flexWrap: "wrap", gap: 10 }}>
+          <div>
+            <b className="sf-display" style={{ color: "var(--rose)" }}>Delete account</b>
+            <p className="small muted">Permanently deletes your BillSplice account and erases all your personal data — your name, email, phone, payment methods, and roommate score. This cannot be undone.</p>
+          </div>
+          <button className="btn danger" onClick={() => setModal({ type: "deleteAccount" })}>Delete my account</button>
+        </div>
+      </div>
     </div>
   );
 }
- 
+
 /* ----------------------------- modals ----------------------------- */
- 
+
 function SplitModal({ db, g, billId, mutate, toast, onClose }) {
   const bill = g.bills.find((b) => b.id === billId);
   const ids = memberIds(g);
@@ -1651,7 +1661,7 @@ function SplitModal({ db, g, billId, mutate, toast, onClose }) {
     </Modal>
   );
 }
- 
+
 function DepositModal({ db, me, g, presetBill, mutate, toast, onClose, goSettings }) {
   const openTotal = round2(g.bills.reduce((a, b) => a + remainingShare(b, me.id), 0));
   const preset = presetBill ? g.bills.find((b) => b.id === presetBill) : null;
@@ -1699,14 +1709,14 @@ function DepositModal({ db, me, g, presetBill, mutate, toast, onClose, goSetting
     </Modal>
   );
 }
- 
+
 function ConnectModal({ db, g, mutate, toast, onClose }) {
   const [step, setStep] = useState("form"); // "form" | "connecting" | "success"
   const [form, setForm] = useState({ utilityName: "", utilityType: "electricity", username: "", password: "" });
   const [importedBill, setImportedBill] = useState(null);
   const [err, setErr] = useState("");
   const set = (k) => (e) => setForm({ ...form, [k]: e.target.value });
- 
+
   const handleConnect = async () => {
     if (!form.utilityName.trim()) return setErr("Enter the name of your utility provider.");
     if (!form.username.trim() || !form.password.trim()) return setErr("Enter your utility account login credentials.");
@@ -1749,7 +1759,7 @@ function ConnectModal({ db, g, mutate, toast, onClose }) {
     });
     setStep("success");
   };
- 
+
   return (
     <Modal title="Connect a utility account" onClose={onClose}>
       {step === "form" && (
@@ -1807,7 +1817,7 @@ function ConnectModal({ db, g, mutate, toast, onClose }) {
     </Modal>
   );
 }
- 
+
 function ConfirmModal({ title, body, confirmLabel, onConfirm, onClose }) {
   return (
     <Modal title={title} onClose={onClose}>
@@ -1819,9 +1829,83 @@ function ConfirmModal({ title, body, confirmLabel, onConfirm, onClose }) {
     </Modal>
   );
 }
- 
+
 /* ----------------------------- auth & gate ----------------------------- */
- 
+
+function DeleteAccountModal({ me, g, mutate, toast, onClose, onDeleted }) {
+  const [step, setStep] = useState("confirm"); // "confirm" | "deleting" | "done"
+  const [err, setErr] = useState("");
+  const [confirm, setConfirm] = useState("");
+
+  const handleDelete = async () => {
+    if (confirm.trim().toUpperCase() !== "DELETE") return setErr("Type DELETE in capitals to confirm.");
+    setStep("deleting"); setErr("");
+    try {
+      // Step 1: remove from group first so other roommates' splits are redistributed
+      if (g) mutate((d) => { removeFromGroup(d, d.groups[g.id], me.id); });
+      // Step 2: call the Edge Function to delete from Supabase Auth + users table
+      const res = await fetch(
+        "https://afhcdniuassflgeblezp.supabase.co/functions/v1/billsplice-api",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "delete-account", data: { userId: me.id } }),
+        }
+      );
+      const result = await res.json();
+      if (!result.ok) { setErr(result.error || "Deletion failed — please try again."); setStep("confirm"); return; }
+      setStep("done");
+      setTimeout(() => { onDeleted(); }, 1800);
+    } catch (e) {
+      setErr("Something went wrong — please try again.");
+      setStep("confirm");
+    }
+  };
+
+  return (
+    <Modal title="Delete account" onClose={step === "deleting" ? () => {} : onClose}>
+      {step === "confirm" && (
+        <div>
+          <div className="alert rose" style={{ marginBottom: 16 }}>
+            <AlertTriangle size={17} style={{ flexShrink: 0, marginTop: 1 }} />
+            <div>
+              <b>This cannot be undone.</b> Your account, profile, roommate score, payment methods, and all personal data will be permanently erased from BillSplice.
+            </div>
+          </div>
+          <p className="small muted" style={{ marginBottom: 16 }}>
+            {g ? `You'll be removed from ${g.name} and your share of any unpaid bills will be redistributed to your roommates.` : ""}
+            {" "}Your email address will be freed up so you (or anyone else) can create a new account with it.
+          </p>
+          <label className="label">Type DELETE to confirm</label>
+          <input className="input" style={{ marginBottom: 10, letterSpacing: ".1em", fontWeight: 700 }}
+            value={confirm} onChange={(e) => { setConfirm(e.target.value.toUpperCase()); setErr(""); }}
+            placeholder="DELETE" maxLength={6} />
+          {err && <p className="small" style={{ color: "var(--rose)", marginBottom: 8 }}>{err}</p>}
+          <div className="row" style={{ marginTop: 6 }}>
+            <button className="btn ghost" style={{ flex: 1 }} onClick={onClose}>Cancel</button>
+            <button className="btn danger" style={{ flex: 1 }} onClick={handleDelete}
+              disabled={confirm.trim().toUpperCase() !== "DELETE"}>
+              Permanently delete
+            </button>
+          </div>
+        </div>
+      )}
+      {step === "deleting" && (
+        <div style={{ textAlign: "center", padding: "28px 0" }}>
+          <p style={{ color: "var(--mute)" }}>Deleting your account…</p>
+        </div>
+      )}
+      {step === "done" && (
+        <div style={{ textAlign: "center", padding: "28px 0" }}>
+          <div style={{ fontSize: 36, marginBottom: 10 }}>✓</div>
+          <b>Account deleted.</b>
+          <p className="small muted" style={{ marginTop: 8 }}>All your data has been permanently erased.</p>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
 function Auth({ signIn, demo, toast, reset }) {
   const [mode, setMode] = useState("welcome");
   const [f, setF] = useState({ name: "", email: "", phone: "", password: "" });
@@ -1831,7 +1915,7 @@ function Auth({ signIn, demo, toast, reset }) {
   const [newPw, setNewPw] = useState("");
   const [newPw2, setNewPw2] = useState("");
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
- 
+
   // Step 1 of reset: confirm the account / send the email
   const doRequestReset = async () => {
     if (!/.+@.+\..+/.test(f.email)) return setErr("Enter the email for your account.");
@@ -1850,7 +1934,7 @@ function Auth({ signIn, demo, toast, reset }) {
       setMode("reset");
     }
   };
- 
+
   // Step 2 (prototype only): wipe old password, save the new one
   const doSetNew = async () => {
     if (newPw.length < 4) return setErr("New password needs at least 4 characters.");
@@ -1864,7 +1948,7 @@ function Auth({ signIn, demo, toast, reset }) {
     setNewPw(""); setNewPw2("");
     setMode("in");
   };
- 
+
   const doSignIn = async () => {
     if (!f.email.trim() || !f.password) return setErr("Enter your email and password.");
     setBusy(true); setErr("");
@@ -1883,7 +1967,7 @@ function Auth({ signIn, demo, toast, reset }) {
       signIn(u.id);
     }
   };
- 
+
   const doSignUp = async () => {
     if (!f.name.trim() || !/.+@.+\..+/.test(f.email) || !f.phone.trim() || f.password.length < 4)
       return setErr("Fill in every field — password needs at least 4 characters.");
@@ -1935,7 +2019,7 @@ function Auth({ signIn, demo, toast, reset }) {
       signIn(id, newUser);
     }
   };
- 
+
   return (
     <div className="auth">
       <FlowRibbon />
@@ -2047,19 +2131,19 @@ function Auth({ signIn, demo, toast, reset }) {
             </p>
           </div>
         )}
- 
+
       </div>
     </div>
   );
 }
- 
+
 function Gate({ me, toast, enterGroup }) {
   const [mode, setMode] = useState("pick");
   const [name, setName] = useState("");
   const [code, setCode] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
- 
+
   const doJoin = async () => {
     setBusy(true); setErr("");
     const norm = code.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -2082,7 +2166,7 @@ function Gate({ me, toast, enterGroup }) {
     Promise.all([dbSaveGroup(group), dbSaveUser(updatedUser)]).catch(() => {});
     toast("You joined " + group.name + "!");
   };
- 
+
   return (
     <div className="auth">
       <FlowRibbon />
@@ -2141,7 +2225,7 @@ function Gate({ me, toast, enterGroup }) {
     </div>
   );
 }
- 
+
 function Logo({ dark }) {
   return (
     <span className="row" style={{ gap: 9 }}>
@@ -2154,9 +2238,9 @@ function Logo({ dark }) {
     </span>
   );
 }
- 
+
 /* ----------------------------- shell ----------------------------- */
- 
+
 const NAV = [
   ["dashboard", "Dashboard", LayoutDashboard],
   ["bills", "Bills", Receipt],
@@ -2164,7 +2248,7 @@ const NAV = [
   ["payments", "Payments", ArrowLeftRight],
   ["settings", "Settings", Settings],
 ];
- 
+
 export default function SplitFlow() {
   const [db, setDb] = useState(null);         // null = still loading
   const [session, setSession] = useState(null);
@@ -2174,10 +2258,10 @@ export default function SplitFlow() {
   const dbRef = useRef(null);
   const sessionRef = useRef(null);
   const syncTimer = useRef(null);
- 
+
   // Keep sessionRef in sync so the interval can read it without closures
   useEffect(() => { sessionRef.current = session; }, [session]);
- 
+
   // ── Sign in: navigate into the app for a user ──────────────────────
   // If `knownUser` is supplied (fresh sign-up), we build state from it
   // directly and never wait on a storage read — so navigation can't hang
@@ -2199,7 +2283,7 @@ export default function SplitFlow() {
     dbSaveSession(userId).catch(() => {});
     setPage("dashboard");
   };
- 
+
   // ── Enter a group: set live state directly from an in-memory db ────
   // Used by create-group and join-group so navigation never waits on a
   // storage round-trip (which could come back empty right after writing).
@@ -2211,7 +2295,7 @@ export default function SplitFlow() {
     dbSaveSession(userId).catch(() => {});
     setPage("dashboard");
   };
- 
+
   const signOut = async () => {
     setSession(null); sessionRef.current = null;
     setPage("dashboard");
@@ -2219,7 +2303,7 @@ export default function SplitFlow() {
     dbRef.current = empty; setDb(empty);
     await dbClearSession();
   };
- 
+
   // ── Mutate: apply fn to cloned db, auto-save changed entities ──────
   const mutate = (fn) => setDb((prev) => {
     const d = structuredClone(prev);
@@ -2244,7 +2328,7 @@ export default function SplitFlow() {
     dbRef.current = d;
     return d;
   });
- 
+
   const toast = (msg) => {
     const id = uid();
     setToasts((t) => [...t, { id, msg }]);
@@ -2254,7 +2338,7 @@ export default function SplitFlow() {
     mutate((d) => { for (let i = 0; i < n; i++) advanceDay(d); });
     toast(n === 1 ? "Advanced one day." : `Advanced ${n} days.`);
   };
- 
+
   // ── Demo mode ────────────────────────────────────────────────────────
   const demo = () => {
     // Build the demo db in memory — navigation never depends on storage reads
@@ -2272,7 +2356,7 @@ export default function SplitFlow() {
     ]).catch(() => {});
     toast("Welcome to the demo house — you\'re Jordan, the admin.");
   };
- 
+
   const resetData = () => {
     const fresh = seedDemo();
     dbRef.current = fresh;
@@ -2287,7 +2371,7 @@ export default function SplitFlow() {
     ]).catch(() => {});
     toast("Prototype data reset.");
   };
- 
+
   // ── On startup: restore session ──────────────────────────────────────
   useEffect(() => {
     let alive = true;
@@ -2303,7 +2387,7 @@ export default function SplitFlow() {
         dbRef.current = empty; setDb(empty);
       }
     })();
- 
+
     // Background sync: re-read the group every 5s to pick up changes from roommates
     const t = setInterval(async () => {
       const sess = sessionRef.current;
@@ -2319,10 +2403,10 @@ export default function SplitFlow() {
       const newDb = await buildDbForUser(sess);
       if (newDb && alive) { dbRef.current = newDb; setDb(newDb); }
     }, 5000);
- 
+
     return () => { alive = false; clearInterval(t); clearTimeout(syncTimer.current); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
- 
+
   // ── Loading screen ────────────────────────────────────────────────────
   if (!db) return (
     <div className="sf-root">
@@ -2335,11 +2419,11 @@ export default function SplitFlow() {
       </div>
     </div>
   );
- 
+
   const me = session ? db.users[session] : null;
   const rawG = me?.groupId ? db.groups[me.groupId] : null;
   const g = rawG && !rawG.deleted ? rawG : null;
- 
+
   const body = !me ? (
     <Auth toast={toast} signIn={signIn} demo={demo} reset={resetData} />
   ) : !g ? (
@@ -2383,7 +2467,7 @@ export default function SplitFlow() {
       </div>
     </div>
   );
- 
+
   return (
     <div className="sf-root">
       <style>{CSS}</style>
@@ -2402,9 +2486,14 @@ export default function SplitFlow() {
       )}
       {modal?.type === "remove" && g && (
         <ConfirmModal title={"Remove " + (db.users[modal.userId]?.name || "roommate") + "?"} confirmLabel="Remove roommate"
-          body="They\'ll keep their account and roommate score, but they\'ll be removed from the house and their share of unpaid bills will be redistributed to everyone else."
+          body="They'll keep their account and roommate score, but they'll be removed from the house and their share of unpaid bills will be redistributed to everyone else."
           onClose={() => setModal(null)}
           onConfirm={() => { mutate((d) => { removeFromGroup(d, d.groups[g.id], modal.userId); }); setModal(null); toast("Roommate removed."); }} />
+      )}
+      {modal?.type === "deleteAccount" && me && (
+        <DeleteAccountModal me={me} g={g} mutate={mutate} toast={toast}
+          onClose={() => setModal(null)}
+          onDeleted={() => { setModal(null); setSession(null); setDb(seedDemo()); dbClearSession(); setPage("dashboard"); }} />
       )}
       <div className="toasts" aria-live="polite">
         {toasts.map((t) => <div className="toast" key={t.id}>{t.msg}</div>)}
@@ -2412,4 +2501,3 @@ export default function SplitFlow() {
     </div>
   );
 }
- 
