@@ -52,7 +52,7 @@ serve(async (req) => {
         // This key is stored as a secure secret — never in your app code
         const adminClient = createClient(
           Deno.env.get("SUPABASE_URL") ?? "",
-          Deno.env.get("SERVICE_ROLE_KEY") ?? "",
+          Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
           { auth: { autoRefreshToken: false, persistSession: false } }
         );
  

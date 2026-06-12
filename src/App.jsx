@@ -974,6 +974,12 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
 
 function Avatar({ user, size = 36 }) {
   const initials = user.name.split(" ").map((w) => w[0]).slice(0, 2).join("");
+  if (user.photoUrl) {
+    return (
+      <img src={user.photoUrl} alt={user.name}
+        style={{ width: size, height: size, borderRadius: "50%", objectFit: "cover", flexShrink: 0 }} />
+    );
+  }
   return (
     <span className="av" style={{
       width: size, height: size, fontSize: size * 0.38,
@@ -1414,6 +1420,7 @@ function RoommatesPage({ db, me, g, mutate, toast, setModal }) {
                 <span className="muted">Failed <b className="num" style={{ color: u.metrics.failed ? "var(--rose)" : "var(--ink)" }}>{u.metrics.failed}</b></span>
                 <span className="muted">Late <b className="num" style={{ color: u.metrics.late ? "var(--amber)" : "var(--ink)" }}>{u.metrics.late}</b></span>
               </div>
+              {u.bio && <p className="small muted" style={{ marginTop: 8, fontStyle: "italic" }}>"{u.bio}"</p>}
               {isAdmin && m.userId !== me.id && (
                 <div style={{ marginTop: 12 }}>
                   <button className="btn danger sm" onClick={() => setModal({ type: "remove", userId: m.userId })}>Remove from group</button>
@@ -1472,11 +1479,48 @@ function SettingsPage({ db, me, g, mutate, toast, setModal }) {
   const today = db.simDate;
   const [name, setName] = useState(g.name);
   const [card, setCard] = useState({ holder: "", number: "", exp: "" });
+  const [bio, setBio] = useState(me.bio || "");
+  const [bioSaved, setBioSaved] = useState(false);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const fileInputRef = React.useRef(null);
 
   const estFor = (pid) => {
     const b = g.bills.filter((x) => x.providerId === pid).sort((a, c) => (a.month < c.month ? 1 : -1))[0];
-    return b ? b.total : PROVIDERS[pid].base;
+    return b ? b.total : (getProvider(g, pid)?.base || 80);
   };
+
+  const handlePhotoUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) return toast("Please select an image file.");
+    if (file.size > 5 * 1024 * 1024) return toast("Image must be under 5MB.");
+    setUploadingPhoto(true);
+    try {
+      const ext = file.name.split(".").pop();
+      const path = `${me.id}/avatar.${ext}`;
+      const { error: uploadError } = await window.supabaseClient.storage
+        .from("avatars")
+        .upload(path, file, { upsert: true });
+      if (uploadError) throw uploadError;
+      const { data: urlData } = window.supabaseClient.storage
+        .from("avatars")
+        .getPublicUrl(path);
+      const photoUrl = urlData.publicUrl + "?t=" + Date.now(); // cache-bust
+      mutate((d) => { d.users[me.id].photoUrl = photoUrl; });
+      toast("Profile photo updated.");
+    } catch (err) {
+      toast("Photo upload failed — please try again.");
+    }
+    setUploadingPhoto(false);
+  };
+
+  const saveBio = () => {
+    mutate((d) => { d.users[me.id].bio = bio.trim(); });
+    setBioSaved(true);
+    setTimeout(() => setBioSaved(false), 2000);
+    toast("Bio saved.");
+  };
+
   const addCard = () => {
     const digits = card.number.replace(/\D/g, "");
     if (!card.holder.trim() || digits.length < 12 || !/^\d{2}\/\d{2}$/.test(card.exp.trim()))
@@ -1495,7 +1539,70 @@ function SettingsPage({ db, me, g, mutate, toast, setModal }) {
     <div className="sf-page">
       <div className="sf-eyebrow">Settings</div>
       <h1 className="sf-h1">Settings</h1>
-      <p className="sf-sub">Your house, autopay, and payment details.</p>
+      <p className="sf-sub">Your profile, house, autopay, and payment details.</p>
+
+      {/* ── My Profile ──────────────────────────────────────────────── */}
+      <div className="card" style={{ marginBottom: 14 }}>
+        <b className="sf-display" style={{ display: "block", marginBottom: 14 }}>My profile</b>
+        <div className="row" style={{ gap: 18, alignItems: "flex-start", flexWrap: "wrap" }}>
+          {/* Photo upload */}
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 8 }}>
+            <div style={{ position: "relative", cursor: "pointer" }} onClick={() => fileInputRef.current?.click()}>
+              {me.photoUrl ? (
+                <img src={me.photoUrl} alt={me.name}
+                  style={{ width: 80, height: 80, borderRadius: "50%", objectFit: "cover",
+                    border: "3px solid var(--teal-soft)" }} />
+              ) : (
+                <Avatar user={me} size={80} />
+              )}
+              <div style={{ position: "absolute", bottom: 0, right: 0, background: "var(--teal)",
+                borderRadius: "50%", width: 26, height: 26, display: "flex", alignItems: "center",
+                justifyContent: "center", border: "2px solid #fff" }}>
+                <span style={{ color: "#04332D", fontSize: 13, fontWeight: 700 }}>+</span>
+              </div>
+            </div>
+            <input ref={fileInputRef} type="file" accept="image/*" style={{ display: "none" }}
+              onChange={handlePhotoUpload} />
+            <button className="btn ghost sm" onClick={() => fileInputRef.current?.click()}
+              disabled={uploadingPhoto}>
+              {uploadingPhoto ? "Uploading…" : "Change photo"}
+            </button>
+          </div>
+
+          {/* Profile details */}
+          <div style={{ flex: 1, minWidth: 220 }}>
+            <div style={{ marginBottom: 10 }}>
+              <div className="label">Name</div>
+              <div style={{ fontWeight: 600, fontSize: 16 }}>{me.name}</div>
+            </div>
+            <div style={{ marginBottom: 10 }}>
+              <div className="label">Email</div>
+              <div className="muted small">{me.email}</div>
+            </div>
+            <div style={{ marginBottom: 10 }}>
+              <div className="label">Phone</div>
+              <div className="muted small">{me.phone}</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Bio */}
+        <div style={{ marginTop: 14 }}>
+          <label className="label" htmlFor="bio">Bio <span className="muted" style={{ fontWeight: 400 }}>(optional — visible to your roommates)</span></label>
+          <textarea id="bio" className="input" rows={3}
+            style={{ resize: "vertical", fontFamily: "inherit", lineHeight: 1.5 }}
+            placeholder="Tell your roommates a bit about yourself…"
+            value={bio} onChange={(e) => { setBio(e.target.value); setBioSaved(false); }}
+            maxLength={200} />
+          <div className="spread" style={{ marginTop: 6 }}>
+            <span className="small muted">{bio.length}/200</span>
+            <button className="btn pri sm" disabled={bio.trim() === (me.bio || "") || bioSaved}
+              onClick={saveBio}>
+              {bioSaved ? "✓ Saved" : "Save bio"}
+            </button>
+          </div>
+        </div>
+      </div>
 
       <div className="card" style={{ marginBottom: 14 }}>
         <b className="sf-display" style={{ display: "block", marginBottom: 10 }}>Living group</b>
