@@ -44,38 +44,46 @@ serve(async (req) => {
       // ── Account deletion — permanently wipes user from Auth + DB ───
       // This MUST run on the server because deleting from Supabase Auth
       // requires the service_role key, which must never go in the browser.
-      case "delete-account": {
-        const { userId } = data;
-        if (!userId) return json({ ok: false, error: "userId is required" }, 400);
- 
-        // Create an admin client using the service role key
-        // This key is stored as a secure secret — never in your app code
-        const adminClient = createClient(
-          Deno.env.get("SUPABASE_URL") ?? "",
-          Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
-          { auth: { autoRefreshToken: false, persistSession: false } }
-        );
- 
-        // Step 1: Delete the user's profile from the users table
-        const { error: profileError } = await adminClient
-          .from("users")
-          .delete()
-          .eq("id", userId);
- 
-        if (profileError) {
-          return json({ ok: false, error: "Failed to delete profile: " + profileError.message }, 500);
-        }
- 
-        // Step 2: Delete the user from Supabase Auth
-        // This frees up their email so they (or someone else) can sign up again
-        const { error: authError } = await adminClient.auth.admin.deleteUser(userId);
- 
-        if (authError) {
-          return json({ ok: false, error: "Failed to delete auth record: " + authError.message }, 500);
-        }
- 
-        return json({ ok: true, message: "Account permanently deleted." });
-      }
+case "delete-account": {
+  const { userId } = data;
+  if (!userId) return json({ ok: false, error: "userId is required" }, 400);
+
+  const adminClient = createClient(
+    Deno.env.get("SUPABASE_URL") ?? "",
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "",
+    { auth: { autoRefreshToken: false, persistSession: false } }
+  );
+
+  // Step 1: Delete profile photo from storage if it exists
+  // Lists all files in the user's avatar folder and removes them
+  const { data: files } = await adminClient.storage
+    .from("avatars")
+    .list(userId);
+  if (files && files.length > 0) {
+    const paths = files.map((f: { name: string }) => `${userId}/${f.name}`);
+    await adminClient.storage.from("avatars").remove(paths);
+  }
+
+  // Step 2: Delete the user's profile from the users table
+  const { error: profileError } = await adminClient
+    .from("users")
+    .delete()
+    .eq("id", userId);
+
+  if (profileError) {
+    return json({ ok: false, error: "Failed to delete profile: " + profileError.message }, 500);
+  }
+
+  // Step 3: Delete the user from Supabase Auth
+  // This frees up their email so they (or someone else) can sign up again
+  const { error: authError } = await adminClient.auth.admin.deleteUser(userId);
+
+  if (authError) {
+    return json({ ok: false, error: "Failed to delete auth record: " + authError.message }, 500);
+  }
+
+  return json({ ok: true, message: "Account permanently deleted." });
+}
  
       // ── SWAP LATER: real card charge via Stripe ────────────────────
       // case "charge-card": {
