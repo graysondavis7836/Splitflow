@@ -2,8 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import {
   Zap, Droplets, Flame, Wifi, Trash2, LayoutDashboard, Receipt, Users,
   ArrowLeftRight, Settings, Plus, Copy, Check, X, LogOut, CreditCard,
-  Wallet, AlertTriangle, Link2, UserPlus, Crown, ChevronRight, CalendarDays, MapPin,
-  Search, ExternalLink, Info, ShieldCheck,
+  Wallet, AlertTriangle, Link2, UserPlus, Crown, ChevronRight, CalendarDays,
 } from "lucide-react";
  
 /* =================================================================
@@ -475,6 +474,10 @@ async function buildDbForUser(userId) {
           if (u) db.users[u.id] = u;
         }
       }
+      // Normalize any bills saved before the Stripe payment architecture update
+      // so old bills have the new payment fields before the app ever renders them
+      const memberIdList = group.members.map((m) => m.userId);
+      group.bills.forEach((b) => ensureBillFields(b, memberIdList));
     } else {
       user.groupId = null; // stale reference — clear it locally
     }
@@ -542,65 +545,172 @@ function sharesFor(bill) {
   return shares;
 }
 const shareOf = (bill, uidd) => (bill.split[uidd] === undefined ? 0 : sharesFor(bill)[uidd] || 0);
+ 
+// Payment status per user per bill:
+//   "pending"    — hasn't authorized yet
+//   "authorized" — committed to pay (autopay on, or manually clicked); Stripe charges at -3 days
+//   "cleared"    — Stripe successfully charged; money going to utility
+//   "declined"   — Stripe charge failed; user has 3 days to fix
+//   "late"       — past due date, still not cleared
+ 
+const payStatusOf  = (bill, uid) => bill.paymentStatus?.[uid] || "pending";
+const isClearedFor = (bill, uid) => payStatusOf(bill, uid) === "cleared";
+ 
+// "Remaining" = still owed (not authorized, not cleared) — what the user still needs to act on
 const remainingShare = (bill, uidd) => {
   const s = shareOf(bill, uidd);
   if (s <= 0) return 0;
-  return Math.max(0, round2(s - (bill.contributed[uidd] || 0)));
+  const status = payStatusOf(bill, uidd);
+  if (status === "cleared" || status === "authorized") return 0;
+  return s;
 };
-const balanceOf = (g) =>
-  round2(g.ledger.reduce((a, e) => a + (e.type === "deposit" ? e.amount : -e.amount), 0));
+ 
+// Total cleared (Stripe successfully charged) across all members for a bill
+const clearedTotal = (bill, g) =>
+  round2(memberIds(g).reduce((a, id) => isClearedFor(bill, id) ? a + shareOf(bill, id) : a, 0));
+ 
+// Total authorized (committed, Stripe charges at -3 days) across all members for a bill
+const authorizedTotal = (bill, g) =>
+  round2(memberIds(g).reduce((a, id) => payStatusOf(bill, id) === "authorized" ? a + shareOf(bill, id) : a, 0));
+ 
+// ── Wallet display helpers ─────────────────────────────────────────
+// Only "active" bills (unpaid or partially_paid) show in the wallet.
+// Cleared shares don't show — once Stripe has them they're gone from the tracker.
+// The wallet shows only what still needs action: authorized + still pending.
+ 
+const activeBillsFor = (g) => g.bills.filter(b => b.status === "unpaid" || b.status === "partially_paid");
+ 
+// Shares that have been committed (Stripe will charge at -3 days)
+const walletAuthorized = (g) =>
+  round2(activeBillsFor(g).reduce((a, b) =>
+    a + memberIds(g).reduce((acc, id) => {
+      const s = shareOf(b, id);
+      return s > 0 && payStatusOf(b, id) === "authorized" ? acc + s : acc;
+    }, 0), 0));
+ 
+// Shares that still need action (pending, declined, or late)
+const walletStillNeeded = (g) =>
+  round2(activeBillsFor(g).reduce((a, b) =>
+    a + memberIds(g).reduce((acc, id) => {
+      const s = shareOf(b, id);
+      const st = payStatusOf(b, id);
+      return s > 0 && (st === "pending" || st === "declined" || st === "late") ? acc + s : acc;
+    }, 0), 0));
+ 
+// Total the wallet cares about = authorized + still needed (cleared is gone, paid bills are gone)
+const walletTotal = (g) => round2(walletAuthorized(g) + walletStillNeeded(g));
  
 function log(g, date, msg, kind) {
   g.activity.unshift({ id: uid(), date, msg, kind });
   if (g.activity.length > 60) g.activity.length = 60;
 }
  
-function contribute(db, g, uidd, bill, amount, method, date) {
-  amount = round2(amount);
-  if (amount <= 0.004) return;
-  g.ledger.push({ id: uid(), date, type: "deposit", userId: uidd, amount, method, billId: bill.id, note: bill.name + " share" });
-  bill.contributed[uidd] = round2((bill.contributed[uidd] || 0) + amount);
-  const s = shareOf(bill, uidd);
-  if (s > 0 && bill.contributed[uidd] >= s - 0.005 && !bill.sharePaidDate[uidd]) {
-    bill.sharePaidDate[uidd] = date;
-    const u = db.users[uidd];
+// ── Attempt Stripe charge for a single user's share ──────────────────
+// SWAP LATER: replace Integrations.chargeCard with real Stripe PaymentIntent
+function chargeUserShare(db, g, bill, userId, date, method) {
+  const u = db.users[userId];
+  const share = shareOf(bill, userId);
+  if (share <= 0) return { ok: false, reason: "no-share" };
+  if (!u.cards.length) {
+    u.metrics.failed++;
+    bill.paymentStatus[userId] = "declined";
+    log(g, date, u.name + "'s payment of " + fmt(share) + " for " + bill.name + " failed — no card on file", "fail");
+    return { ok: false, reason: "no-card" };
+  }
+  const res = Integrations.chargeCard(u.cards[0], share); // SWAP LATER: real Stripe charge
+  if (res.ok) {
+    bill.paymentStatus[userId] = "cleared";
+    bill.contributed[userId] = share; // keep for ledger/history compatibility
+    bill.sharePaidDate[userId] = date;
+    g.ledger.push({ id: uid(), date, type: "deposit", userId, amount: share, method, billId: bill.id, note: bill.name + " share cleared" });
     if (date <= bill.due) u.metrics.onTime++;
-    if (bill.status === "paid") u.metrics.billsPaid++;
+    log(g, date, u.name + "'s payment of " + fmt(share) + " cleared for " + bill.name, "info");
+    return { ok: true };
+  } else {
+    bill.paymentStatus[userId] = "declined";
+    u.metrics.failed++;
+    log(g, date, u.name + "'s payment of " + fmt(share) + " was declined for " + bill.name + " — 3 days to fix it", "fail");
+    return { ok: false, reason: "declined" };
   }
 }
  
-function settle(db, g, date) {
-  let guard = 0;
-  while (guard++ < 25) {
-    const bal = balanceOf(g);
-    const candidates = g.bills
-      .filter((b) => b.status === "unpaid" && b.total <= bal + 0.001)
-      .sort((a, b) => b.total - a.total); // wallet pays the largest bill it can cover
-    if (!candidates.length) break;
-    const b = candidates[0];
-    Integrations.payUtility(PROVIDERS[b.providerId], b.total); // SWAP LATER: real payout
-    b.status = "paid";
-    b.paidOn = date;
-    g.ledger.push({ id: uid(), date, type: "bill", amount: b.total, billId: b.id, method: "House wallet", note: "Paid " + b.name });
-    memberIds(g).forEach((id) => { if (b.sharePaidDate[id]) db.users[id].metrics.billsPaid++; });
-    log(g, date, "House wallet paid " + b.name + " — " + fmt(b.total), "paid");
+// ── Attempt charges for all authorized shares (runs 3 days before due) ──
+function attemptCharges(db, g, bill, date) {
+  if (bill.chargeAttempted) return;
+  bill.chargeAttempted = true;
+  memberIds(g).forEach((id) => {
+    if (payStatusOf(bill, id) === "authorized") {
+      chargeUserShare(db, g, bill, id, date, "Autopay");
+    }
+  });
+}
+ 
+// ── Pay utility with all cleared shares (runs on due date) ──────────
+// SWAP LATER: replace Integrations.payUtility with real Stripe → utility payment
+function payUtilityWithCleared(db, g, bill, date) {
+  const cleared = clearedTotal(bill, g);
+  if (cleared <= 0) return;
+ 
+  // Mark any still-pending or declined shares as late
+  memberIds(g).forEach((id) => {
+    const status = payStatusOf(bill, id);
+    if (shareOf(bill, id) > 0 && (status === "pending" || status === "declined")) {
+      bill.paymentStatus[id] = "late";
+      bill.lateFeePaidBy = [...(bill.lateFeePaidBy || []), id];
+      if (!bill.lateFlagged[id]) {
+        bill.lateFlagged[id] = true;
+        db.users[id].metrics.late++;
+        db.users[id].score = Math.max(0, db.users[id].score - 1);
+      }
+    }
+  });
+ 
+  // Send payment to utility — only the cleared amount
+  Integrations.payUtility(getProvider(g, bill.providerId), cleared); // SWAP LATER: real Stripe → utility
+  g.ledger.push({ id: uid(), date, type: "bill", amount: cleared, billId: bill.id, method: "Stripe → Utility", note: "Paid " + bill.name + (cleared < bill.total ? " (partial)" : "") });
+ 
+  const allCleared = memberIds(g).every((id) => shareOf(bill, id) <= 0 || isClearedFor(bill, id));
+  if (allCleared) {
+    bill.status = "paid";
+    bill.paidOn = date;
+    memberIds(g).forEach((id) => { if (isClearedFor(bill, id)) db.users[id].metrics.billsPaid++; });
+    log(g, date, bill.name + " paid in full via Stripe — " + fmt(cleared), "paid");
+  } else {
+    bill.status = "partially_paid";
+    bill.partialPaidOn = date;
+    memberIds(g).forEach((id) => { if (isClearedFor(bill, id)) db.users[id].metrics.billsPaid++; });
+    const lateNames = (bill.lateFeePaidBy || []).map(id => db.users[id]?.name?.split(" ")[0] || "Roommate").join(", ");
+    log(g, date, bill.name + " partially paid — " + fmt(cleared) + " sent to utility. Late: " + lateNames, "fail");
   }
 }
  
-function allocateDeposit(db, g, uidd, amount, method, date) {
-  let rem = round2(amount);
-  const open = g.bills
-    .filter((b) => remainingShare(b, uidd) > 0)
-    .sort((a, b) => (a.due < b.due ? -1 : 1));
-  for (const b of open) {
-    if (rem <= 0.004) break;
-    const pay = Math.min(remainingShare(b, uidd), rem);
-    contribute(db, g, uidd, b, pay, method, date);
-    rem = round2(rem - pay);
+// ── Late user pays their remaining share (Option B — through BillSplice → Stripe → utility) ──
+function payLateShare(db, g, userId, bill, date) {
+  if (payStatusOf(bill, userId) !== "late") return { ok: false };
+  const res = chargeUserShare(db, g, bill, userId, date, "Manual (late)");
+  if (!res.ok) return res;
+  // Send this share directly to utility as a second payment
+  Integrations.payUtility(getProvider(g, bill.providerId), shareOf(bill, userId)); // SWAP LATER: real Stripe
+  db.users[userId].metrics.billsPaid++;
+  log(g, date, db.users[userId].name + " paid late share of " + fmt(shareOf(bill, userId)) + " for " + bill.name + " — sent directly to utility", "info");
+  // Check if now fully paid
+  const allCleared = memberIds(g).every((id) => shareOf(bill, id) <= 0 || isClearedFor(bill, id));
+  if (allCleared) { bill.status = "paid"; bill.paidOn = date; }
+  return { ok: true };
+}
+ 
+// ── Manual authorization (user clicks "Authorize" or "Pay now") ──────
+function authorizeOrPay(db, g, userId, bill, date) {
+  const daysLeft = daysUntil(date, bill.due);
+  if (daysLeft <= 3) {
+    // Close to due date — charge immediately
+    return chargeUserShare(db, g, bill, userId, date, "Manual");
+  } else {
+    // More than 3 days out — just authorize; Stripe charges at -3 day mark
+    bill.paymentStatus[userId] = "authorized";
+    log(g, date, db.users[userId].name + " authorized payment of " + fmt(shareOf(bill, userId)) + " for " + bill.name, "info");
+    return { ok: true };
   }
-  if (rem > 0.004)
-    g.ledger.push({ id: uid(), date, type: "deposit", userId: uidd, amount: rem, method, note: "Wallet top-up" });
-  settle(db, g, date);
 }
  
 function equalSplit(ids) {
@@ -617,11 +727,25 @@ function makeBill(g, provider, due, monthKey, ids, fixedAmount) {
   const imported = fixedAmount !== undefined
     ? { amount: fixedAmount, due, month: monthKey }
     : Integrations.fetchProviderBill(provider, monthKey, due);
+  // paymentStatus per user: "pending" | "authorized" | "cleared" | "declined" | "late"
+  const paymentStatus = {};
+  ids.forEach((id) => { paymentStatus[id] = "pending"; });
   return {
     id: uid(), providerId: provider.id, name: provider.name, icon: provider.icon,
     total: imported.amount, due: imported.due, month: imported.month,
-    status: "unpaid", paidOn: null, split: equalSplit(ids),
-    contributed: {}, sharePaidDate: {}, lateFlagged: {}, autopayFailed: {},
+    status: "unpaid",           // "unpaid" | "partially_paid" | "paid"
+    paidOn: null,
+    partialPaidOn: null,        // date of partial payment to utility
+    split: equalSplit(ids),
+    paymentStatus,              // per-user Stripe payment status
+    contributed: {},            // cleared amount per user (for ledger compat)
+    sharePaidDate: {},          // date share was cleared
+    lateFlagged: {},            // has late penalty been applied
+    chargeAttempted: false,     // has the 3-day Stripe charge been attempted
+    notified14: false,          // has the 14-day notification been sent
+    lateFee: 0,                 // utility late fee amount (set when partially paid)
+    lateFeePaidBy: [],          // userIds responsible for the late fee
+    autopayFailed: {},          // kept for backwards compat
   };
 }
  
@@ -641,42 +765,51 @@ function advanceDay(db) {
         log(g, next, "New bill detected from " + p.name, "new");
       }
     }
-    // 2) Autopay: pull each person's share 14 days before the due date
+ 
     for (const b of g.bills) {
-      for (const m of g.members) {
-        const u = db.users[m.userId];
-        if (!u.autopay || !u.autopay[b.providerId]) continue;
-        const need = remainingShare(b, u.id);
-        if (need <= 0 || daysUntil(next, b.due) > 14) continue;
-        if (u.cards.length) {
-          const res = Integrations.chargeCard(u.cards[0], need); // SWAP LATER: real charge
-          if (res.ok) {
-            contribute(db, g, u.id, b, need, "Autopay", next);
-            log(g, next, "Autopay pulled " + fmt(need) + " from " + u.name + " for " + b.name, "info");
-          }
-        } else if (!b.autopayFailed[u.id]) {
-          b.autopayFailed[u.id] = true;
-          u.metrics.failed++;
-          log(g, next, "Autopay failed for " + u.name + " — no payment method on file", "fail");
-        }
-      }
-    }
-    // 3) Pay whatever the wallet can cover
-    settle(db, g, next);
-    // 4) Late tracking: −1 roommate score for every day a share is late
-    for (const b of g.bills) {
-      if (b.status === "paid" || next <= b.due) continue;
-      for (const m of g.members) {
-        const id = m.userId;
-        if (shareOf(b, id) > 0 && !b.sharePaidDate[id]) {
+      if (b.status === "paid") continue;
+      const daysLeft = daysUntil(next, b.due);
+ 
+      // 2) 14 days before due: notify + auto-authorize autopay users
+      if (daysLeft === 14 && !b.notified14) {
+        b.notified14 = true;
+        memberIds(g).forEach((id) => {
           const u = db.users[id];
-          u.score = Math.max(0, u.score - 1);
-          if (!b.lateFlagged[id]) {
-            b.lateFlagged[id] = true;
-            u.metrics.late++;
-            log(g, next, u.name + " is late on " + b.name, "fail");
+          const share = shareOf(b, id);
+          if (share <= 0) return;
+          // Autopay users are automatically authorized at 14 days out
+          if (u.autopay?.[b.providerId]) {
+            if (!u.cards.length) {
+              b.autopayFailed[id] = true;
+              u.metrics.failed++;
+              log(g, next, "Autopay failed for " + u.name + " — no card on file for " + b.name, "fail");
+            } else {
+              b.paymentStatus[id] = "authorized";
+              log(g, next, u.name + " autopay authorized " + fmt(share) + " for " + b.name + " — Stripe charges in 11 days", "info");
+            }
+          } else {
+            log(g, next, u.name + " has " + fmt(share) + " due in 14 days for " + b.name + " — authorize payment to avoid a late fee", "amber");
           }
-        }
+        });
+      }
+ 
+      // 3) 3 days before due: attempt Stripe charges for all authorized shares
+      if (daysLeft === 3 && !b.chargeAttempted) {
+        attemptCharges(db, g, b, next);
+      }
+ 
+      // 4) On due date: pay utility with all cleared shares
+      if (next === b.due && b.status === "unpaid") {
+        payUtilityWithCleared(db, g, b, next);
+      }
+ 
+      // 5) After due date: daily −1 score penalty for late shares
+      if (next > b.due && b.status !== "paid") {
+        memberIds(g).forEach((id) => {
+          if (payStatusOf(b, id) === "late") {
+            db.users[id].score = Math.max(0, db.users[id].score - 1);
+          }
+        });
       }
     }
   }
@@ -790,20 +923,40 @@ function seedDemo() {
   ["Frontier Fiber", "Atmos Energy", "Oncor Electric", "City Water Utility"].forEach((n) =>
     log(g, "2026-06-01", "New bill detected from " + n, "new"));
  
-  // Scripted June flow (everything below runs through the real engine)
-  contribute(db, g, "u_sarah", bInt, remainingShare(bInt, "u_sarah"), "Manual", "2026-06-03");
-  contribute(db, g, "u_jordan", bInt, remainingShare(bInt, "u_jordan"), "Autopay", "2026-06-04");
-  contribute(db, g, "u_mike", bInt, remainingShare(bInt, "u_mike"), "Manual", "2026-06-05");
-  settle(db, g, "2026-06-05");
-  contribute(db, g, "u_jordan", bGas, remainingShare(bGas, "u_jordan"), "Autopay", "2026-06-06");
-  contribute(db, g, "u_sarah", bGas, remainingShare(bGas, "u_sarah"), "Manual", "2026-06-06");
-  settle(db, g, "2026-06-06");
-  contribute(db, g, "u_jordan", bEle, remainingShare(bEle, "u_jordan"), "Autopay", "2026-06-07");
-  contribute(db, g, "u_sarah", bEle, remainingShare(bEle, "u_sarah"), "Autopay", "2026-06-07");
-  settle(db, g, "2026-06-07");
-  contribute(db, g, "u_jordan", bWat, remainingShare(bWat, "u_jordan"), "Autopay", "2026-06-08");
-  contribute(db, g, "u_sarah", bWat, remainingShare(bWat, "u_sarah"), "Manual", "2026-06-08");
-  settle(db, g, "2026-06-08");
+  // Scripted June flow — Jordan and Sarah have cleared their shares (Stripe charged successfully).
+  // Mike has not acted yet — his shares are still pending, showing the real partial-payment scenario.
+  const clearShare = (bill, userId, date, method) => {
+    bill.paymentStatus[userId] = "cleared";
+    bill.contributed[userId] = shareOf(bill, userId);
+    bill.sharePaidDate[userId] = date;
+    g.ledger.push({ id: uid(), date, type: "deposit", userId, amount: shareOf(bill, userId), method, billId: bill.id, note: bill.name + " share cleared" });
+  };
+  // Frontier (Internet) — all 3 paid → fully paid
+  clearShare(bInt, "u_sarah",  "2026-06-03", "Manual");
+  clearShare(bInt, "u_jordan", "2026-06-04", "Autopay");
+  clearShare(bInt, "u_mike",   "2026-06-05", "Manual");
+  bInt.status = "paid"; bInt.paidOn = "2026-06-05";
+  g.ledger.push({ id: uid(), date: "2026-06-05", type: "bill", amount: bInt.total, billId: bInt.id, method: "Stripe → Utility", note: "Paid " + bInt.name });
+  log(g, "2026-06-05", bInt.name + " paid in full via Stripe — " + fmt(bInt.total), "paid");
+ 
+  // Atmos Gas — Jordan + Sarah cleared, Mike pending → shows authorized vs pending scenario
+  clearShare(bGas, "u_jordan", "2026-06-06", "Autopay");
+  clearShare(bGas, "u_sarah",  "2026-06-06", "Manual");
+  bGas.paymentStatus["u_mike"] = "pending";
+  bGas.chargeAttempted = false;
+  bGas.notified14 = true;
+ 
+  // Oncor Electric — Jordan + Sarah cleared, Mike authorized (autopay coming)
+  clearShare(bEle, "u_jordan", "2026-06-07", "Autopay");
+  clearShare(bEle, "u_sarah",  "2026-06-07", "Autopay");
+  bEle.paymentStatus["u_mike"] = "authorized";
+  bEle.notified14 = true;
+ 
+  // City Water — Jordan cleared, Sarah + Mike pending
+  clearShare(bWat, "u_jordan", "2026-06-08", "Autopay");
+  bWat.paymentStatus["u_sarah"] = "pending";
+  bWat.paymentStatus["u_mike"]  = "pending";
+  bWat.notified14 = true;
   const seedStamp = Date.now();
   db.epoch = 1;
   db.clockUp = 1;
@@ -974,7 +1127,12 @@ button:focus-visible,input:focus-visible,[tabindex]:focus-visible{outline:2px so
 /* ----------------------------- small components ----------------------------- */
  
 function Avatar({ user, size = 36 }) {
-  const initials = user.name.split(" ").map((w) => w[0]).slice(0, 2).join("");
+  if (!user) return (
+    <span className="av" style={{ width: size, height: size, fontSize: size * 0.38,
+      background: "linear-gradient(135deg, hsl(200 30% 40%), hsl(200 30% 32%))" }}
+      aria-hidden="true">?</span>
+  );
+  const initials = (user.name || "?").split(" ").map((w) => w[0]).slice(0, 2).join("");
   if (user.photoUrl) {
     return (
       <img src={user.photoUrl} alt={user.name}
@@ -984,7 +1142,7 @@ function Avatar({ user, size = 36 }) {
   return (
     <span className="av" style={{
       width: size, height: size, fontSize: size * 0.38,
-      background: `linear-gradient(135deg, hsl(${user.hue} 62% 46%), hsl(${user.hue + 42} 60% 38%))`,
+      background: `linear-gradient(135deg, hsl(${user.hue ?? 200} 62% 46%), hsl(${(user.hue ?? 200) + 42} 60% 38%))`,
     }} aria-hidden="true">{initials}</span>
   );
 }
@@ -1008,9 +1166,19 @@ function Pill({ tone, children }) { return <span className={"pill " + tone}>{chi
  
 function StatusPill({ bill, today }) {
   if (bill.status === "paid") return <Pill tone="teal"><Check size={12} /> Paid {fmtDate(bill.paidOn)}</Pill>;
-  if (today > bill.due) return <Pill tone="rose">Late · due {fmtDate(bill.due)}</Pill>;
-  if (daysUntil(today, bill.due) <= 5) return <Pill tone="amber">Due soon · {fmtDate(bill.due)}</Pill>;
+  if (bill.status === "partially_paid") return <Pill tone="amber">Partially paid · {bill.partialPaidOn ? fmtDate(bill.partialPaidOn) : ""}</Pill>;
+  if (today > bill.due) return <Pill tone="rose">Past due · {fmtDate(bill.due)}</Pill>;
+  if (daysUntil(today, bill.due) <= 3) return <Pill tone="rose">Charging soon · {fmtDate(bill.due)}</Pill>;
+  if (daysUntil(today, bill.due) <= 14) return <Pill tone="amber">Due soon · {fmtDate(bill.due)}</Pill>;
   return <Pill tone="slate">Due {fmtDate(bill.due)}</Pill>;
+}
+ 
+function UserPayStatusPill({ status, share }) {
+  if (status === "cleared")    return <Pill tone="teal"><Check size={12} /> Cleared · {fmt(share)}</Pill>;
+  if (status === "authorized") return <Pill tone="teal">Authorized · {fmt(share)}</Pill>;
+  if (status === "declined")   return <Pill tone="rose">Declined · {fmt(share)}</Pill>;
+  if (status === "late")       return <Pill tone="rose">Late · {fmt(share)}</Pill>;
+  return <Pill tone="slate">Pending · {fmt(share)}</Pill>;
 }
  
 function Toggle({ on, onClick, label }) {
@@ -1058,6 +1226,29 @@ function FlowRibbon() {
  
 /* ----------------------------- pages ----------------------------- */
  
+// ── Normalize a bill from storage to ensure all new fields exist ─────
+// Old bills stored before the Stripe payment update won't have these fields.
+// This is called lazily — the bill is mutated in place the first time it's read.
+function ensureBillFields(bill, memberIds) {
+  if (!bill.paymentStatus) {
+    bill.paymentStatus = {};
+    (memberIds || []).forEach((id) => {
+      // Old bills used contributed/sharePaidDate — map to cleared if paid
+      if (bill.sharePaidDate?.[id]) bill.paymentStatus[id] = "cleared";
+      else bill.paymentStatus[id] = "pending";
+    });
+  }
+  if (!bill.lateFeePaidBy) bill.lateFeePaidBy = [];
+  if (bill.lateFee === undefined) bill.lateFee = 0;
+  if (bill.chargeAttempted === undefined) bill.chargeAttempted = false;
+  if (bill.notified14 === undefined) bill.notified14 = false;
+  if (!bill.partialPaidOn) bill.partialPaidOn = null;
+  if (!bill.icon || !["zap","droplets","flame","wifi","trash"].includes(bill.icon)) {
+    bill.icon = bill.icon || "zap"; // ensure a valid ICONS key
+  }
+  return bill;
+}
+ 
 function Dashboard({ db, me, g, mutate, toast, setModal, setPage }) {
   const today = db.simDate;
   const monthBills = g.bills.filter((b) => b.month === monthOf(today));
@@ -1067,9 +1258,10 @@ function Dashboard({ db, me, g, mutate, toast, setModal, setPage }) {
   const needed = round2(monthBills.reduce((a, b) => a + b.total, 0));
   const paid = round2(monthBills.filter((b) => b.status === "paid").reduce((a, b) => a + b.total, 0));
   const youOwe = round2(g.bills.filter((b) => b.status === "unpaid").reduce((a, b) => a + remainingShare(b, me.id), 0));
-  const balance = balanceOf(g);
-  const unpaidTotal = round2(g.bills.filter((b) => b.status === "unpaid").reduce((a, b) => a + b.total, 0));
-  const pct = unpaidTotal <= 0 ? 100 : Math.min(100, (balance / unpaidTotal) * 100);
+  const wAuthorized  = walletAuthorized(g);
+  const wNeeded      = walletStillNeeded(g);
+  const wTotal       = round2(wAuthorized + wNeeded);
+  const pctAuth      = wTotal <= 0 ? 100 : Math.min(100, (wAuthorized / wTotal) * 100);
   const isAdmin = g.members.find((m) => m.userId === me.id)?.admin;
  
   // roommates who still owe their share on bills the wallet already covered
@@ -1108,9 +1300,9 @@ function Dashboard({ db, me, g, mutate, toast, setModal, setPage }) {
           <div>
             <b>Shares still owed to the house wallet.</b>{" "}
             {Object.entries(debts).map(([id, d]) =>
-              `${db.users[id].name} owes ${fmt(d.amount)} (${d.bills.join(", ")})`).join(" · ")}
+              `${db.users[id]?.name ?? "A roommate"} owes ${fmt(d.amount)} (${d.bills.join(", ")})`).join(" · ")}
             {debts[me.id] && <div style={{ marginTop: 6 }}>
-              <button className="btn danger sm" onClick={() => setModal({ type: "deposit" })}>Pay what I owe</button>
+              <button className="btn danger sm" onClick={() => setPage("bills")}>Pay what I owe</button>
             </div>}
           </div>
         </div>
@@ -1118,7 +1310,7 @@ function Dashboard({ db, me, g, mutate, toast, setModal, setPage }) {
       {isAdmin && newJoiners.length > 0 && (
         <div className="alert amber" style={{ marginBottom: 14 }}>
           <UserPlus size={17} style={{ flexShrink: 0, marginTop: 1 }} />
-          <div><b>{newJoiners.map((m) => db.users[m.userId].name).join(", ")} joined mid-month.</b> They aren't in this
+          <div><b>{newJoiners.map((m) => db.users[m.userId]?.name ?? "A roommate").join(", ")} joined mid-month.</b> They aren't in this
             month's splits yet — use <b>Edit split</b> below to include them as much (or as little) as you decide.</div>
         </div>
       )}
@@ -1145,18 +1337,40 @@ function Dashboard({ db, me, g, mutate, toast, setModal, setPage }) {
       <div className="grid g2" style={{ alignItems: "start" }}>
         <div className="wallet-card">
           <div className="spread" style={{ position: "relative" }}>
-            <div className="row"><Wallet size={17} /><b className="sf-display">House wallet</b></div>
-            <span className="small" style={{ color: "#8FB9B2" }}>rolls over monthly</span>
+            <div className="row"><Wallet size={17} /><b className="sf-display">Payment tracker</b></div>
+            <span className="small" style={{ color: "#8FB9B2" }}>Active bills only</span>
           </div>
-          <div className="sf-display num" style={{ fontSize: 34, fontWeight: 700, marginTop: 10, position: "relative" }}>{fmt(balance)}</div>
-          <Tank pct={pct} />
-          <div className="spread" style={{ position: "relative" }}>
-            <span className="small" style={{ color: "#9DC4BE" }}>
-              {unpaidTotal <= 0 ? "All bills covered — leftover rolls into next month"
-                : `Covers ${Math.floor(pct)}% of ${fmt(unpaidTotal)} still unpaid`}
-            </span>
-            <button className="btn pri sm" onClick={() => setModal({ type: "deposit" })}><Plus size={14} /> Add money</button>
-          </div>
+          {wTotal <= 0 ? (
+            <div style={{ textAlign: "center", padding: "20px 0", position: "relative" }}>
+              <div style={{ fontSize: 28, marginBottom: 6 }}>✓</div>
+              <div className="small" style={{ color: "#9DC4BE" }}>All bills paid — check Payments for history</div>
+            </div>
+          ) : (
+            <>
+              {/* Progress bar: authorized (teal) vs still needed (dark) */}
+              <div style={{ height: 10, borderRadius: 99, background: "rgba(255,255,255,.08)", overflow: "hidden", margin: "16px 0 10px", position: "relative" }}>
+                <div style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: pctAuth + "%", background: "#19CDB6", borderRadius: 99, transition: "width .6s ease" }} />
+              </div>
+              <div className="grid" style={{ gridTemplateColumns: "1fr 1fr", gap: 8, position: "relative", marginBottom: 12 }}>
+                <div>
+                  <div className="small" style={{ color: "#19CDB6", fontWeight: 700 }}>{fmt(wAuthorized)}</div>
+                  <div className="small" style={{ color: "#6BA8A0" }}>Authorized — Stripe charges at −3 days</div>
+                </div>
+                <div>
+                  <div className="small" style={{ color: wNeeded > 0 ? "#FF9BAE" : "#5E7A7C", fontWeight: 700 }}>{fmt(wNeeded)}</div>
+                  <div className="small" style={{ color: "#6BA8A0" }}>{wNeeded > 0 ? "Still needed — roommates must act" : "Nothing pending"}</div>
+                </div>
+              </div>
+              <div className="spread" style={{ position: "relative" }}>
+                <span className="small" style={{ color: "#9DC4BE" }}>
+                  {wNeeded <= 0
+                    ? "All shares authorized — Stripe charges cards and pays utilities"
+                    : `${fmt(wAuthorized)} of ${fmt(wTotal)} committed for active bills`}
+                </span>
+                <button className="btn pri sm" onClick={() => setPage("bills")}><ChevronRight size={14} /> Pay shares</button>
+              </div>
+            </>
+          )}
         </div>
  
         <div className="card">
@@ -1167,7 +1381,7 @@ function Dashboard({ db, me, g, mutate, toast, setModal, setPage }) {
           {cycleBills.length === 0 && <p className="muted small" style={{ padding: "10px 0" }}>
             No bills yet. Connect your utility accounts and BillSplice will import them automatically.</p>}
           {cycleBills.map((b) => {
-            const Icon = ICONS[b.icon];
+            const Icon = ICONS[b.icon] || Zap;
             return (
               <div className="lrow" key={b.id}>
                 <span className="bill-ic"><Icon size={17} /></span>
@@ -1204,7 +1418,7 @@ function Dashboard({ db, me, g, mutate, toast, setModal, setPage }) {
               </div>
               <div className="small muted" style={{ marginTop: 5 }}>
                 {Object.entries(b.split).map(([id2, p]) =>
-                  `${db.users[id2]?.name.split(" ")[0] ?? "Former roommate"} ${p}%`).join(" · ")}
+                  `${db.users[id2]?.name?.split(" ")[0] ?? "Former roommate"} ${p}%`).join(" · ")}
               </div>
             </div>
           ))}
@@ -1260,6 +1474,7 @@ function BillsPage({ db, me, g, mutate, setModal, toast }) {
           <div className="row" style={{ flexWrap: "wrap", gap: 16 }}>
             {g.members.map((m) => {
               const u = db.users[m.userId];
+              if (!u) return null;
               return (
                 <div className="row" key={m.userId} style={{ gap: 8 }}>
                   <Avatar user={u} size={30} />
@@ -1284,7 +1499,7 @@ function BillsPage({ db, me, g, mutate, setModal, toast }) {
       )}
  
       {monthBills.map((b) => {
-        const Icon = ICONS[b.icon];
+        const Icon = ICONS[b.icon] || Zap;
         const myRem = remainingShare(b, me.id);
         return (
           <div className="card" key={b.id} style={{ marginBottom: 14 }}>
@@ -1315,8 +1530,9 @@ function BillsPage({ db, me, g, mutate, setModal, toast }) {
             <hr className="hr" />
             {memberIds(g).map((id) => {
               const u = db.users[id];
+              if (!u) return null;
               const share = shareOf(b, id);
-              const rem = remainingShare(b, id);
+              const status = payStatusOf(b, id);
               return (
                 <div className="lrow" key={id}>
                   <Avatar user={u} size={30} />
@@ -1325,21 +1541,47 @@ function BillsPage({ db, me, g, mutate, setModal, toast }) {
                     <span className="small muted"> · {b.split[id] ?? 0}%</span>
                   </div>
                   <span className="num" style={{ fontWeight: 600 }}>{fmt(share)}</span>
-                  {share <= 0 ? <Pill tone="slate">Not included</Pill>
-                    : rem <= 0 ? <Pill tone="teal"><Check size={12} /> Share in wallet</Pill>
-                    : <Pill tone={today > b.due ? "rose" : "amber"}>Owes {fmt(rem)}</Pill>}
+                  {share <= 0
+                    ? <Pill tone="slate">Not included</Pill>
+                    : <UserPayStatusPill status={status} share={share} />}
                 </div>
               );
             })}
-            {myRem > 0 && (
-              <div style={{ marginTop: 10 }}>
-                <button className="btn pri sm" disabled={!hasCard}
-                  onClick={() => setModal({ type: "deposit", presetBill: b.id })}>
-                  Pay my share · {fmt(myRem)}
-                </button>
-                {!hasCard && <span className="small muted" style={{ marginLeft: 9 }}>Add a card in Settings first.</span>}
+            {/* Late fee notice */}
+            {b.lateFee > 0 && b.lateFeePaidBy?.length > 0 && (
+              <div className="alert rose" style={{ marginTop: 10 }}>
+                <AlertTriangle size={15} style={{ flexShrink: 0 }} />
+                <span className="small">Utility late fee of {fmt(b.lateFee)} applies — caused by {(b.lateFeePaidBy || []).map(id => db.users[id]?.name?.split(" ")[0] || "Roommate").join(", ")}.</span>
               </div>
             )}
+            {/* My action button */}
+            {b.status !== "paid" && (() => {
+              const myStatus = payStatusOf(b, me.id);
+              const myShare = shareOf(b, me.id);
+              if (myShare <= 0 || myStatus === "cleared" || myStatus === "authorized") return null;
+              const daysLeft = daysUntil(today, b.due);
+              const isLate = myStatus === "late";
+              const btnLabel = isLate
+                ? "Pay late share · " + fmt(myShare)
+                : daysLeft <= 3
+                  ? "Pay now · " + fmt(myShare)
+                  : "Authorize payment · " + fmt(myShare);
+              const btnSub = isLate
+                ? "Stripe charges your card and pays the utility directly."
+                : daysLeft <= 3
+                  ? "Stripe charges your card immediately and pays the utility."
+                  : "Commits your payment. Stripe charges your card in " + (daysLeft - 3) + " days, then pays the utility on the due date.";
+              return (
+                <div style={{ marginTop: 10 }}>
+                  <button className="btn pri sm" disabled={!hasCard}
+                    onClick={() => setModal({ type: "authorizePayment", billId: b.id, isLate })}>
+                    {btnLabel}
+                  </button>
+                  <div className="small muted" style={{ marginTop: 4 }}>{btnSub}</div>
+                  {!hasCard && <span className="small muted" style={{ marginLeft: 9 }}>Add a card in Settings first.</span>}
+                </div>
+              );
+            })()}
           </div>
         );
       })}
@@ -1397,6 +1639,7 @@ function RoommatesPage({ db, me, g, mutate, toast, setModal }) {
       <div className="grid g2">
         {[...g.members].sort((a, b) => (a.joinedAt < b.joinedAt ? -1 : 1)).map((m) => {
           const u = db.users[m.userId];
+          if (!u) return null;
           return (
             <div className="card" key={m.userId}>
               <div className="spread">
@@ -1448,7 +1691,7 @@ function PaymentsPage({ db, me, g }) {
         {[["all", "All"], ["in", "Contributions"], ["out", "Bill payments"]].map(([k, l]) => (
           <button key={k} className={"btn sm " + (filter === k ? "dark" : "ghost")} onClick={() => setFilter(k)}>{l}</button>
         ))}
-        <span className="small muted" style={{ marginLeft: "auto" }}>Wallet balance <b className="num" style={{ color: "var(--ink)" }}>{fmt(balanceOf(g))}</b></span>
+        <span className="small muted" style={{ marginLeft: "auto" }}>Committed <b className="num" style={{ color: "var(--ink)" }}>{fmt(walletAuthorized(g))}</b></span>
       </div>
       <div className="card">
         {rows.length === 0 && <p className="muted small" style={{ padding: "8px 0" }}>No payments yet.</p>}
@@ -1631,7 +1874,7 @@ function SettingsPage({ db, me, g, mutate, toast, setModal }) {
       <div className="card" style={{ marginBottom: 14 }}>
         <b className="sf-display" style={{ display: "block" }}>Autopay</b>
         <p className="small muted" style={{ marginBottom: 8 }}>
-          When on, BillSplice pulls your share from your card into the house wallet 14 days before each due date.
+          When on, BillSplice automatically authorizes your share 14 days before each due date. Stripe charges your card 3 days before the due date, then pays the utility directly on the due date — no money passes through BillSplice.
           {me.cards.length === 0 && <b style={{ color: "var(--rose)" }}> Add a card below first — autopay fails without one.</b>}
         </p>
         {g.providers.length === 0 && <p className="muted small">Connect a utility on the Bills page to set up autopay.</p>}
@@ -1735,7 +1978,6 @@ function SplitModal({ db, g, billId, mutate, toast, onClose }) {
         }
       });
       log(d.groups[g.id], d.simDate, "Split updated for " + b.name, "info");
-      settle(d, d.groups[g.id], d.simDate);
     });
     toast("Split saved for " + bill.name + ".");
     onClose();
@@ -1747,6 +1989,7 @@ function SplitModal({ db, g, billId, mutate, toast, onClose }) {
       </p>
       {ids.map((id) => {
         const u = db.users[id];
+        if (!u) return null;
         const v = parseFloat(pcts[id]) || 0;
         return (
           <div className="row" key={id} style={{ marginBottom: 9 }}>
@@ -1770,48 +2013,89 @@ function SplitModal({ db, g, billId, mutate, toast, onClose }) {
   );
 }
  
-function DepositModal({ db, me, g, presetBill, mutate, toast, onClose, goSettings }) {
-  const openTotal = round2(g.bills.reduce((a, b) => a + remainingShare(b, me.id), 0));
-  const preset = presetBill ? g.bills.find((b) => b.id === presetBill) : null;
-  const [amt, setAmt] = useState(preset ? String(remainingShare(preset, me.id)) : openTotal > 0 ? String(openTotal) : "");
+function AuthorizePaymentModal({ db, me, g, billId, isLate, mutate, toast, onClose, goSettings }) {
+  const bill = g.bills.find((b) => b.id === billId);
   const hasCard = me.cards.length > 0;
-  const v = round2(parseFloat(amt) || 0);
-  const deposit = () => {
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState(false);
+  if (!bill) return null;
+  const myShare = shareOf(bill, me.id);
+  const daysLeft = daysUntil(db.simDate, bill.due);
+  const isImmediate = isLate || daysLeft <= 3;
+ 
+  const handleAction = () => {
+    setBusy(true);
     mutate((d) => {
-      const res = Integrations.chargeCard(d.users[me.id].cards[0], v); // SWAP LATER: real charge
-      if (!res.ok) return;
-      allocateDeposit(d, d.groups[g.id], me.id, v, "Manual", d.simDate);
-      log(d.groups[g.id], d.simDate, d.users[me.id].name + " added " + fmt(v) + " to the wallet", "info");
+      const gg = d.groups[g.id];
+      const b = gg.bills.find((x) => x.id === billId);
+      if (isLate) {
+        payLateShare(d, gg, me.id, b, d.simDate);
+      } else {
+        authorizeOrPay(d, gg, me.id, b, d.simDate);
+      }
     });
-    toast(fmt(v) + " added to the house wallet.");
-    onClose();
+    setBusy(false);
+    setDone(true);
+    const newStatus = isLate ? "paid directly to utility" : isImmediate ? "charged to your card" : "authorized";
+    toast(fmt(myShare) + " for " + bill.name + " " + newStatus + ".");
+    setTimeout(() => onClose(), 1400);
   };
+ 
   return (
-    <Modal title="Add money to the house wallet" onClose={onClose}>
+    <Modal title={isLate ? "Pay late share" : isImmediate ? "Pay now" : "Authorize payment"} onClose={onClose}>
       {!hasCard ? (
         <div>
           <p className="small muted" style={{ marginBottom: 14 }}>
-            You need a connected card first — money always moves card → wallet → utility company.
+            You need a connected card first — Stripe charges your card and pays the utility directly.
           </p>
           <button className="btn pri" style={{ width: "100%" }} onClick={() => { onClose(); goSettings(); }}>
             <CreditCard size={15} /> Add a card in Settings
           </button>
         </div>
+      ) : done ? (
+        <div style={{ textAlign: "center", padding: "20px 0" }}>
+          <div style={{ fontSize: 36, marginBottom: 10 }}>✓</div>
+          <b>{isImmediate ? "Payment cleared" : "Payment authorized"}</b>
+          <p className="small muted" style={{ marginTop: 8 }}>
+            {isImmediate ? "Stripe has charged your card and will pay the utility." : "Stripe will charge your card and pay the utility on the due date."}
+          </p>
+        </div>
       ) : (
         <div>
-          <p className="small muted" style={{ marginBottom: 12 }}>
-            Funds are charged to your {me.cards[0].brand} •••• {me.cards[0].last4} and go straight into the wallet.
-            Your deposit covers your open shares first (earliest due date first); anything extra stays in the wallet and rolls over.
-          </p>
-          <label className="label" htmlFor="depamt">Amount</label>
-          <input id="depamt" className="input num" inputMode="decimal" value={amt} onChange={(e) => setAmt(e.target.value)} placeholder="0.00" />
-          <div className="row" style={{ marginTop: 9, flexWrap: "wrap" }}>
-            {openTotal > 0 && <button className="btn ghost sm" onClick={() => setAmt(String(openTotal))}>Cover all my shares · {fmt(openTotal)}</button>}
-            {[25, 50, 100].map((q) => <button key={q} className="btn ghost sm" onClick={() => setAmt(String(q))}>${q}</button>)}
+          {/* How it works explanation */}
+          <div style={{ background: "var(--teal-soft)", borderRadius: 12, padding: "13px 15px", marginBottom: 16 }}>
+            <div className="small" style={{ color: "var(--teal-ink)", lineHeight: 1.7 }}>
+              {isLate ? (
+                <>
+                  <b>Late payment:</b> Stripe charges your {me.cards[0].brand} •••• {me.cards[0].last4} for {fmt(myShare)} and sends it directly to {bill.name}. No money passes through BillSplice.
+                </>
+              ) : isImmediate ? (
+                <>
+                  <b>Paying now:</b> Stripe charges your {me.cards[0].brand} •••• {me.cards[0].last4} for {fmt(myShare)} immediately and pays {bill.name} on the due date ({fmtDate(bill.due)}).
+                </>
+              ) : (
+                <>
+                  <b>How this works:</b> You're committing your {fmt(myShare)} share now. Stripe charges your {me.cards[0].brand} •••• {me.cards[0].last4} in {daysLeft - 3} days, then pays {bill.name} directly on the due date ({fmtDate(bill.due)}). No money passes through BillSplice.
+                </>
+              )}
+            </div>
           </div>
-          <button className="btn pri" style={{ width: "100%", marginTop: 14 }} disabled={!(v > 0)} onClick={deposit}>
-            Deposit {v > 0 ? fmt(v) : ""}
+          <div className="spread" style={{ marginBottom: 16 }}>
+            <span>Your share of <b>{bill.name}</b></span>
+            <span className="sf-display num" style={{ fontSize: 22, fontWeight: 700 }}>{fmt(myShare)}</span>
+          </div>
+          {isLate && bill.lateFee > 0 && (
+            <div className="alert rose" style={{ marginBottom: 14 }}>
+              <AlertTriangle size={15} style={{ flexShrink: 0 }} />
+              <span className="small">A utility late fee of {fmt(bill.lateFee)} was added to this bill because of your late payment. You're responsible for this fee.</span>
+            </div>
+          )}
+          <button className="btn pri" style={{ width: "100%" }} disabled={busy} onClick={handleAction}>
+            {busy ? "Processing…" : isLate ? "Pay late share · " + fmt(myShare) : isImmediate ? "Pay now · " + fmt(myShare) : "Authorize · " + fmt(myShare)}
           </button>
+          <p className="small muted" style={{ marginTop: 10, textAlign: "center" }}>
+            Stripe handles all payments — BillSplice never holds your money.
+          </p>
         </div>
       )}
     </Modal>
@@ -1863,7 +2147,6 @@ function ConnectModal({ db, g, mutate, toast, onClose }) {
       gg.providers.push(pid);
       gg.bills.push(bill);
       log(gg, simDate, "New bill detected from " + providerRecord.name, "new");
-      settle(d, gg, simDate);
     });
     setStep("success");
   };
@@ -2282,7 +2565,7 @@ function Gate({ me, toast, enterGroup }) {
         <div className="row" style={{ marginBottom: 18 }}>
           <Logo />
         </div>
-        <h2 style={{ fontSize: 21 }}>Hi {me.name.split(" ")[0]} 👋</h2>
+        <h2 style={{ fontSize: 21 }}>Hi {(me.name || "there").split(" ")[0]} 👋</h2>
         <p style={{ color: "#9DC4BE", margin: "6px 0 20px" }}>To get started, create a living group for your house — or join one with the code your roommate shared.</p>
         {mode === "pick" && (
           <div className="grid" style={{ gap: 10 }}>
@@ -2347,379 +2630,6 @@ function Logo({ dark }) {
   );
 }
  
-/* =================================================================
-   FIND UTILITIES PAGE — curated provider directory
-   -----------------------------------------------------------------
-   A visitor enters a ZIP + service type and sees the provider(s)
-   serving that area, a typical monthly cost, and a signup link.
- 
-   • Some utilities are COMPETITIVE (internet): multiple options.
-   • Most are REGULATED/MUNICIPAL (electric, gas, water, trash):
-     exactly ONE provider serves an address — we say so, no fake choice.
- 
-   PRICING IS A CURATED ESTIMATE, NOT A LIVE QUOTE — you maintain the
-   numbers below and they're labeled as typical estimates in the UI.
- 
-   HOW TO ADD A NEW AREA:
-   1. Add an entry to UTILITY_DIRECTORY keyed by the 5-digit ZIP.
-   2. List providers by type key (electric/gas/water/internet/trash),
-      copying the shape of the Oxford entry.
-   ================================================================= */
- 
-const UF_TYPES = {
-  electric: { key: "electric", label: "Electric",  icon: Zap,     competitive: false },
-  gas:      { key: "gas",      label: "Natural gas", icon: Flame,   competitive: false },
-  water:    { key: "water",    label: "Water & sewer", icon: Droplets, competitive: false },
-  internet: { key: "internet", label: "Internet",  icon: Wifi,    competitive: true  },
-  trash:    { key: "trash",    label: "Trash & recycling", icon: Trash2, competitive: false },
-};
- 
-/* Seeded with Oxford, MS (Ole Miss). VERIFY these details and prices against
-   each provider before launch — they are a starting point, not gospel. */
-const OXFORD_PROVIDERS = {
-  electric: [
-    {
-      name: "Entergy Mississippi",
-      priceLow: 120, priceHigh: 175,
-      blurb: "Investor-owned electric utility serving much of Oxford and Lafayette County.",
-      url: "https://www.entergy-mississippi.com",
-    },
-    {
-      name: "North East Mississippi EPA (NEMEPA)",
-      priceLow: 115, priceHigh: 170,
-      blurb: "Member-owned electric co-op serving parts of the Oxford area. Which one serves you depends on your exact address.",
-      url: "https://www.nemepa.com",
-    },
-  ],
-  gas: [
-    {
-      name: "CenterPoint Energy",
-      priceLow: 35, priceHigh: 75,
-      blurb: "Natural gas provider for the Oxford area. Cost swings with the season and heating use.",
-      url: "https://www.centerpointenergy.com",
-    },
-  ],
-  water: [
-    {
-      name: "Oxford Utilities (City of Oxford)",
-      priceLow: 45, priceHigh: 90,
-      blurb: "Municipal water and sewer for addresses inside Oxford city limits. Set up service through the city.",
-      url: "https://oxfordms.net",
-    },
-  ],
-  internet: [
-    {
-      name: "C Spire Fiber",
-      priceLow: 55, priceHigh: 100,
-      blurb: "Fiber internet available across much of Oxford. Speed tiers set the price.",
-      url: "https://www.cspire.com/home",
-    },
-    {
-      name: "Xfinity (Comcast)",
-      priceLow: 40, priceHigh: 90,
-      blurb: "Cable internet with a range of speed tiers; intro pricing often rises after the first year.",
-      url: "https://www.xfinity.com",
-    },
-    {
-      name: "AT&T Internet",
-      priceLow: 55, priceHigh: 95,
-      blurb: "Fiber where available, otherwise DSL/fixed. Availability varies block to block.",
-      url: "https://www.att.com/internet",
-    },
-    {
-      name: "Metronet",
-      priceLow: 50, priceHigh: 90,
-      blurb: "Fiber internet expanding through parts of Oxford.",
-      url: "https://www.metronet.com",
-    },
-  ],
-  trash: [
-    {
-      name: "City of Oxford Environmental Services",
-      priceLow: 18, priceHigh: 30,
-      blurb: "Municipal trash and recycling pickup for city addresses, usually billed with your city utilities.",
-      url: "https://oxfordms.net",
-    },
-  ],
-};
- 
-const UTILITY_DIRECTORY = {
-  "38655": { city: "Oxford", state: "MS", providers: OXFORD_PROVIDERS }, // Oxford
-  "38677": { city: "Oxford", state: "MS", providers: OXFORD_PROVIDERS }, // Ole Miss campus
-};
- 
-function ufLookup(zip, typeKey) {
-  const area = UTILITY_DIRECTORY[zip];
-  if (!area) return { status: "no-area" };
-  const providers = area.providers[typeKey] || [];
-  if (!providers.length) return { status: "no-type", area };
-  return { status: "ok", area, providers };
-}
- 
-const ufMoney = (n) => "$" + n.toLocaleString("en-US");
- 
-const UF_CSS = `
-.uf-root{min-height:100%;background:var(--mist);color:var(--ink)}
-.uf-root h1,.uf-root h2,.uf-root h3{font-family:'Space Grotesk',system-ui,sans-serif;letter-spacing:-0.02em}
- 
-/* hero */
-.uf-hero{background:linear-gradient(150deg,#0A222B,#071A20 60%);color:#E7F6F3;position:relative;overflow:hidden;
-  padding:56px 24px 48px}
-.uf-hero::before{content:'';position:absolute;inset:0;pointer-events:none;
-  background:radial-gradient(520px 300px at 108% -10%,rgba(20,200,176,.20),transparent 70%)}
-.uf-hero-in{max-width:920px;margin:0 auto;position:relative}
-.uf-eyebrow{font-size:11.5px;font-weight:600;letter-spacing:.16em;text-transform:uppercase;color:#5FE6D2}
-.uf-hero h1{font-size:34px;font-weight:700;line-height:1.12;margin:8px 0 10px}
-.uf-hero p{color:#9DC4BE;max-width:560px;font-size:15px}
-.uf-wave{position:absolute;left:0;right:0;bottom:-1px;color:var(--mist);opacity:.9}
- 
-/* search card */
-.uf-search{max-width:920px;margin:-30px auto 0;position:relative;z-index:3;padding:0 24px}
-.uf-search-card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);
-  box-shadow:0 12px 40px rgba(7,26,32,.16);padding:18px}
-.uf-fields{display:grid;grid-template-columns:1fr 1.2fr auto;gap:12px;align-items:end}
-.uf-label{display:block;font-size:12.5px;font-weight:600;color:var(--ink-2);margin:0 0 6px}
-.uf-input,.uf-select{width:100%;border:1px solid var(--line-2);border-radius:11px;padding:11px 13px;background:#fff}
-.uf-input:focus,.uf-select:focus{outline:2px solid var(--teal);outline-offset:0;border-color:transparent}
- 
-/* type chips */
-.uf-types{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
-.uf-chip{display:inline-flex;align-items:center;gap:7px;padding:8px 13px;border-radius:99px;
-  border:1px solid var(--line-2);background:#fff;color:var(--ink-2);font-weight:600;font-size:13px;
-  transition:background .15s,border-color .15s,color .15s}
-.uf-chip:hover{background:#F4F8F8}
-.uf-chip.on{background:var(--teal-soft);border-color:transparent;color:var(--teal-ink)}
- 
-.uf-btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;font-weight:600;
-  border-radius:11px;padding:11px 18px;transition:transform .1s,background .15s;white-space:nowrap}
-.uf-btn:active{transform:translateY(1px)}
-.uf-btn.pri{background:var(--teal);color:#04332D}
-.uf-btn.pri:hover{background:#13C6AF}
-.uf-btn.ghost{border:1px solid var(--line-2);background:#fff}
-.uf-btn.ghost:hover{background:#F4F8F8}
-.uf-btn.dark{background:var(--deep-2);color:#CFF5EE}
-.uf-btn.dark:hover{background:#11333E}
-.uf-btn.sm{padding:8px 13px;font-size:13px;border-radius:9px}
-.uf-btn:disabled{opacity:.45;cursor:not-allowed}
- 
-/* results */
-.uf-page{max-width:920px;margin:0 auto;padding:28px 24px 56px}
-.uf-resulthead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px}
-.uf-pill{display:inline-flex;align-items:center;gap:5px;font-size:12px;font-weight:600;padding:3px 10px;border-radius:99px;white-space:nowrap}
-.uf-pill.teal{background:var(--teal-soft);color:var(--teal-ink)}
-.uf-pill.slate{background:#E7EEEE;color:var(--ink-2)}
-.uf-sub{color:var(--mute);margin-bottom:18px}
- 
-.uf-note{display:flex;gap:11px;align-items:flex-start;border-radius:13px;padding:12px 15px;font-size:13px;
-  background:var(--amber-soft);color:#7A4E0A;border:1px solid #EDD9B0;margin-bottom:18px}
- 
-.uf-card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:18px;
-  box-shadow:0 1px 2px rgba(12,32,39,.04);margin-bottom:14px}
-.uf-card-top{display:flex;gap:14px;align-items:flex-start}
-.uf-ic{width:44px;height:44px;border-radius:12px;display:flex;align-items:center;justify-content:center;
-  background:var(--teal-soft);color:var(--teal-ink);flex-shrink:0}
-.uf-name{font-size:17px;font-weight:700}
-.uf-blurb{color:var(--mute);font-size:13.5px;margin-top:3px}
-.uf-price{text-align:right;flex-shrink:0}
-.uf-price b{font-family:'Space Grotesk';font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}
-.uf-price span{display:block;font-size:11.5px;color:var(--mute)}
-.uf-actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:14px}
- 
-.uf-empty{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:40px 24px;text-align:center}
-.uf-empty h3{font-size:19px;margin:12px 0 4px}
-.uf-empty p{color:var(--mute);max-width:440px;margin:0 auto 16px}
- 
-.uf-foot{max-width:920px;margin:0 auto;padding:0 24px 40px;color:var(--mute);font-size:12.5px;display:flex;
-  gap:8px;align-items:flex-start}
- 
-@media(max-width:720px){
-  .uf-hero{padding:40px 18px 44px}
-  .uf-hero h1{font-size:27px}
-  .uf-fields{grid-template-columns:1fr}
-  .uf-search,.uf-page,.uf-foot{padding-left:16px;padding-right:16px}
-  .uf-card-top{flex-wrap:wrap}
-  .uf-price{text-align:left}
-}
-`;
- 
-function UtilityFinder({ onConnect }) {
-  const [zip, setZip] = useState("");
-  const [type, setType] = useState("electric");
-  const [result, setResult] = useState(null);
- 
-  const runSearch = () => {
-    const z = zip.trim().replace(/[^0-9]/g, "").slice(0, 5);
-    if (z.length !== 5) {
-      setResult({ status: "bad-zip" });
-      return;
-    }
-    setResult({ ...ufLookup(z, type), zip: z, typeKey: type });
-  };
- 
-  const T = UF_TYPES[type];
- 
-  return (
-    <div className="uf-root">
-      <style>{UF_CSS}</style>
- 
-      {/* hero + search */}
-      <section className="uf-hero">
-        <div className="uf-hero-in">
-          <div className="uf-eyebrow">Find your utilities</div>
-          <h1>See who provides<br />power, water &amp; internet at your place.</h1>
-          <p>Enter your ZIP and pick a service. We'll show the provider that covers your
-            area, a typical monthly cost, and where to sign up — then you can split it with
-            your roommates in BillSplice.</p>
-        </div>
-        <svg className="uf-wave" viewBox="0 0 1440 40" preserveAspectRatio="none" aria-hidden="true">
-          <path d="M0 20 Q 180 0 360 20 T 720 20 T 1080 20 T 1440 20 V40 H0 Z" fill="currentColor" />
-        </svg>
-      </section>
- 
-      <div className="uf-search">
-        <div className="uf-search-card">
-          <div className="uf-fields">
-            <div>
-              <label className="uf-label" htmlFor="uf-zip">ZIP code</label>
-              <input
-                id="uf-zip" className="uf-input" inputMode="numeric" maxLength={5}
-                placeholder="38655" value={zip}
-                onChange={(e) => setZip(e.target.value.replace(/[^0-9]/g, "").slice(0, 5))}
-                onKeyDown={(e) => { if (e.key === "Enter") runSearch(); }}
-              />
-            </div>
-            <div>
-              <label className="uf-label" htmlFor="uf-type">Service type</label>
-              <select id="uf-type" className="uf-select" value={type} onChange={(e) => setType(e.target.value)}>
-                {Object.values(UF_TYPES).map((t) => (
-                  <option key={t.key} value={t.key}>{t.label}</option>
-                ))}
-              </select>
-            </div>
-            <button className="uf-btn pri" onClick={runSearch}>
-              <Search size={16} /> Find providers
-            </button>
-          </div>
- 
-          <div className="uf-types" role="group" aria-label="Quick service type">
-            {Object.values(UF_TYPES).map((t) => {
-              const Icon = t.icon;
-              return (
-                <button
-                  key={t.key}
-                  className={"uf-chip" + (type === t.key ? " on" : "")}
-                  onClick={() => setType(t.key)}
-                  aria-pressed={type === t.key}
-                >
-                  <Icon size={15} /> {t.label}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      </div>
- 
-      {/* results */}
-      <div className="uf-page">
-        {!result && (
-          <div className="uf-empty">
-            <MapPin size={26} style={{ color: "var(--teal-ink)" }} />
-            <h3>Start with your ZIP</h3>
-            <p>Try <b>38655</b> (Oxford, MS) to see how it works. Pick a service type above,
-              then hit Find providers.</p>
-          </div>
-        )}
- 
-        {result?.status === "bad-zip" && (
-          <div className="uf-empty">
-            <Info size={26} style={{ color: "var(--amber)" }} />
-            <h3>That ZIP doesn't look right</h3>
-            <p>Enter a 5-digit US ZIP code and try again.</p>
-          </div>
-        )}
- 
-        {result?.status === "no-area" && (
-          <div className="uf-empty">
-            <MapPin size={26} style={{ color: "var(--mute)" }} />
-            <h3>We're not in {result.zip} yet</h3>
-            <p>BillSplice is launching in Oxford, MS first. We're adding new areas fast —
-              your house can still connect its utilities on the Bills page.</p>
-            <button className="uf-btn dark" onClick={() => onConnect?.(null)}>
-              Connect a utility instead <ChevronRight size={15} />
-            </button>
-          </div>
-        )}
- 
-        {result?.status === "no-type" && (
-          <div className="uf-empty">
-            <T.icon size={26} style={{ color: "var(--mute)" }} />
-            <h3>No {T.label.toLowerCase()} provider listed for {result.area.city}, {result.area.state}</h3>
-            <p>We don't have this service mapped for your area yet. Try another service type.</p>
-          </div>
-        )}
- 
-        {result?.status === "ok" && (
-          <>
-            <div className="uf-resulthead">
-              <h2 style={{ fontSize: 22, fontWeight: 700 }}>
-                {T.label} in {result.area.city}, {result.area.state}
-              </h2>
-              {T.competitive
-                ? <span className="uf-pill teal">{result.providers.length} options — you choose</span>
-                : <span className="uf-pill slate">Serves your area</span>}
-            </div>
-            <p className="uf-sub">
-              {T.competitive
-                ? "These providers compete in your area — compare and pick the one you want."
-                : "This service is provided by a single utility for your address. There's no other provider to choose from — this is who bills you."}
-            </p>
- 
-            <div className="uf-note">
-              <Info size={16} style={{ flexShrink: 0, marginTop: 1 }} />
-              <div>Costs shown are <b>typical monthly estimates</b> for a household, not live quotes.
-                Your actual bill depends on usage, plan, and the season — confirm on the provider's site.</div>
-            </div>
- 
-            {result.providers.map((p, i) => {
-              const Icon = T.icon;
-              return (
-                <div className="uf-card" key={i}>
-                  <div className="uf-card-top">
-                    <span className="uf-ic"><Icon size={20} /></span>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div className="uf-name">{p.name}</div>
-                      <div className="uf-blurb">{p.blurb}</div>
-                    </div>
-                    <div className="uf-price">
-                      <b>{ufMoney(p.priceLow)}–{ufMoney(p.priceHigh)}</b>
-                      <span>typical / month</span>
-                    </div>
-                  </div>
-                  <div className="uf-actions">
-                    <button className="uf-btn pri sm" onClick={() => onConnect?.(p)}>
-                      <Plus size={14} /> Connect in BillSplice
-                    </button>
-                    <a className="uf-btn ghost sm" href={p.url} target="_blank" rel="noopener noreferrer">
-                      Visit website <ExternalLink size={14} />
-                    </a>
-                  </div>
-                </div>
-              );
-            })}
-          </>
-        )}
-      </div>
- 
-      <div className="uf-foot">
-        <ShieldCheck size={15} style={{ flexShrink: 0, marginTop: 1 }} />
-        <span>Provider details and prices are maintained by BillSplice and shown as estimates.
-          We're not affiliated with these utilities. Always confirm current pricing and availability
-          directly with the provider before signing up.</span>
-      </div>
-    </div>
-  );
-}
- 
 /* ----------------------------- shell ----------------------------- */
  
 const NAV = [
@@ -2727,7 +2637,6 @@ const NAV = [
   ["bills", "Bills", Receipt],
   ["roommates", "Roommates", Users],
   ["payments", "Payments", ArrowLeftRight],
-  ["find", "Find utilities", MapPin],
   ["settings", "Settings", Settings],
 ];
  
@@ -2825,6 +2734,11 @@ export default function SplitFlow() {
   const demo = () => {
     // Build the demo db in memory — navigation never depends on storage reads
     const fresh = seedDemo();
+    // Normalize all demo bills so they have the new payment fields
+    Object.values(fresh.groups).forEach((g) => {
+      const mids = g.members.map((m) => m.userId);
+      g.bills.forEach((b) => ensureBillFields(b, mids));
+    });
     dbRef.current = fresh;
     setDb(fresh);
     setSession("u_jordan");
@@ -2841,6 +2755,11 @@ export default function SplitFlow() {
  
   const resetData = () => {
     const fresh = seedDemo();
+    // Normalize all demo bills so they have the new payment fields
+    Object.values(fresh.groups).forEach((g) => {
+      const mids = g.members.map((m) => m.userId);
+      g.bills.forEach((b) => ensureBillFields(b, mids));
+    });
     dbRef.current = fresh;
     setDb(fresh);
     setSession("u_jordan");
@@ -2945,7 +2864,6 @@ export default function SplitFlow() {
         {page === "bills" && <BillsPage db={db} me={me} g={g} mutate={mutate} setModal={setModal} toast={toast} />}
         {page === "roommates" && <RoommatesPage db={db} me={me} g={g} mutate={mutate} toast={toast} setModal={setModal} />}
         {page === "payments" && <PaymentsPage db={db} me={me} g={g} />}
-        {page === "find" && <UtilityFinder onConnect={() => { setPage("bills"); setModal({ type: "connect" }); }} />}
         {page === "settings" && <SettingsPage db={db} me={me} g={g} mutate={mutate} toast={toast} setModal={setModal} />}
       </div>
     </div>
@@ -2956,9 +2874,9 @@ export default function SplitFlow() {
       <style>{CSS}</style>
       {body}
       {modal?.type === "split" && g && <SplitModal db={db} g={g} billId={modal.billId} mutate={mutate} toast={toast} onClose={() => setModal(null)} />}
-      {modal?.type === "deposit" && g && me && (
-        <DepositModal db={db} me={me} g={g} presetBill={modal.presetBill} mutate={mutate} toast={toast}
-          onClose={() => setModal(null)} goSettings={() => setPage("settings")} />
+      {modal?.type === "authorizePayment" && g && me && (
+        <AuthorizePaymentModal db={db} me={me} g={g} billId={modal.billId} isLate={modal.isLate}
+          mutate={mutate} toast={toast} onClose={() => setModal(null)} goSettings={() => setPage("settings")} />
       )}
       {modal?.type === "connect" && g && <ConnectModal db={db} g={g} mutate={mutate} toast={toast} onClose={() => setModal(null)} />}
       {modal?.type === "leave" && g && me && (
